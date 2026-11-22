@@ -19,8 +19,10 @@ function watchedByGuard(world, x, y) {
 }
 
 /** Step the world toward `target` (a tile centre) until close, waiting out
- * a guard's cone when the next tile is watched and this spot is safe. */
-function walkTo(world, target, timeoutSeconds) {
+ * a guard's cone when the next tile is watched and this spot is safe.
+ * `sneak` walks slowly and silently — used on level 4 so the staging walk
+ * does not set off the creaky floor. */
+function walkTo(world, target, timeoutSeconds, sneak = false) {
   const s = world.state;
   let waited = 0;
   let steps = 0;
@@ -32,11 +34,11 @@ function walkTo(world, target, timeoutSeconds) {
     const nextWatched = watchedByGuard(world, target.x, target.y);
     const hereWatched = watchedByGuard(world, s.player.x, s.player.y);
     if (nextWatched && !hereWatched && waited < 6) {
-      world.step(STEP, { mx: 0, my: 0, sneak: false, interact: false }, false);
+      world.step(STEP, { mx: 0, my: 0, sneak, interact: false }, false);
       waited += STEP;
     } else {
       const len = Math.hypot(dx, dy) || 1;
-      world.step(STEP, { mx: dx / len, my: dy / len, sneak: false, interact: false }, false);
+      world.step(STEP, { mx: dx / len, my: dy / len, sneak, interact: false }, false);
       waited = 0;
     }
     if (s.status !== 'playing') return false;
@@ -45,9 +47,9 @@ function walkTo(world, target, timeoutSeconds) {
   return false;
 }
 
-function followPath(world, path, timeoutSeconds) {
+function followPath(world, path, timeoutSeconds, sneak = false) {
   for (const point of path) {
-    if (!walkTo(world, point, timeoutSeconds)) return false;
+    if (!walkTo(world, point, timeoutSeconds, sneak)) return false;
   }
   return true;
 }
@@ -80,11 +82,14 @@ function stageShot(name, world) {
   }
 
   if (name === 'vault') {
-    world.reset(2);
+    // The Crown Chamber (level 4): the thief sneaks to the south hall on
+    // the creaky boards, a guard patrol and a camera cone in view, the
+    // laser grid and the diamond glowing up in the vault room.
+    world.reset(3);
     const s = world.state;
     const from = tileOf(world, s.player.x, s.player.y);
-    const path = world.findPath(from.x, from.y, 22, 3);
-    if (path) followPath(world, path.slice(1), MAX_SECONDS);
+    const path = world.findPath(from.x, from.y, 24, 10);
+    if (path) followPath(world, path.slice(1), MAX_SECONDS, true);
     stand(world, 1.5);
     return { screen: SCREEN_PLAY, best: 0 };
   }

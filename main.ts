@@ -1,11 +1,12 @@
 // SILENT VAULT — a museum heist stealth game (Node 22, standard library
 // only). The game is this directory's game/ folder: plain static files a
 // desktop browser loads offline (game/index.html and its ES modules, no
-// library and no network request). One thief, three floors of the Halden
+// library and no network request). One thief, four floors of the Halden
 // Museum at night, patrolling guards with vision cones, sweeping cameras
-// with cuttable panels, a laser grid in the vault, and the Aurora Diamond
-// waiting behind it all — grab it, grab what else you can carry, and reach
-// the getaway van before the alarm meter fills.
+// with cuttable panels, a laser grid in the vault, creaky floorboards in
+// the Crown Chamber, and the Aurora Diamond waiting behind it all — grab
+// it, grab what else you can carry (paintings, the crown, golden artefacts),
+// and reach the getaway van before the alarm meter fills.
 //
 // This program hands the game in. It copies game/ and screenshots/ from
 // beside this file to /output and writes /output/dossier.json, the summary

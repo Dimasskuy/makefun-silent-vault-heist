@@ -9,6 +9,7 @@ const EVENT_SUSPICIOUS = 4;
 const EVENT_TRIP = 8;
 const EVENT_BUSTED = 16;
 const EVENT_CLEARED = 32;
+const EVENT_CREAK = 64;
 
 const TAU = Math.PI * 2;
 
@@ -157,9 +158,15 @@ function createWorld(random) {
     ghostBonus: 0,
     bustedReason: '',
     particles: [],
+    floaters: [],
+    trauma: 0,
+    creakFlash: 0,
   };
 
   function reset(levelIndex) {
+    // No argument means "restart the level we are on" (the play-test
+    // autopilot and the R key both rely on that).
+    if (levelIndex === undefined) levelIndex = state.levelIndex;
     const level = LEVELS[levelIndex];
     state.levelIndex = levelIndex;
     state.status = 'playing';
@@ -167,7 +174,7 @@ function createWorld(random) {
     state.elapsed = 0;
     const start = findMarker(level, 'T');
     const sp = tileCenter(start.x, start.y);
-    state.player = { x: sp.x, y: sp.y, angle: 0, sneak: false };
+    state.player = { x: sp.x, y: sp.y, angle: 0, sneak: false, walkPhase: 0, moving: false };
     state.guards = level.guards.map((g) => {
       const wps = g.waypoints.map(([tx, ty]) => tileCenter(tx, ty));
       const next = wps[1] ?? wps[0];
@@ -182,6 +189,9 @@ function createWorld(random) {
         lastSeen: null,
         lostTimer: 0,
         scan: 0,
+        walkPhase: 0,
+        stateTime: 0,
+        moving: false,
       };
     });
     state.cameras = level.cameras.map((c, i) => {
@@ -205,7 +215,9 @@ function createWorld(random) {
     }
     state.loot = lootTiles.map(([tx, ty], i) => {
       const p = tileCenter(tx, ty);
-      return { x: p.x, y: p.y, value: level.lootValues[i], taken: false };
+      const kind = (level.lootKinds && level.lootKinds[i]) || 'gem';
+      const label = { gem: 'Permata', painting: 'Lukisan', crown: 'Mahkota', artifact: 'Artefak Emas', vase: 'Vas Antik' }[kind] || 'Loot';
+      return { x: p.x, y: p.y, value: level.lootValues[i], kind, label, taken: false };
     });
     const d = findMarker(level, 'D');
     const dp = tileCenter(d.x, d.y);
@@ -231,6 +243,19 @@ function createWorld(random) {
     state.ghostBonus = 0;
     state.bustedReason = '';
     state.particles = [];
+    state.floaters = [];
+    state.trauma = 0;
+    state.creakFlash = 0;
+  }
+
+  /** Screen-shake trauma (game-feel): events add, it decays to zero on its
+   * own; the renderer reads trauma^2, so small hits barely nudge. */
+  function addTrauma(amount) {
+    state.trauma = Math.min(1, state.trauma + amount);
+  }
+
+  function floater(x, y, text, color) {
+    state.floaters.push({ x, y, text, color, life: FLOATER_LIFE });
   }
 
   function burst(x, y, color, n) {
@@ -252,6 +277,7 @@ function createWorld(random) {
     if (state.status !== 'playing') return EVENT_NONE;
     state.status = 'busted';
     state.bustedReason = reason;
+    addTrauma(1);
     return EVENT_BUSTED;
   }
 
@@ -282,7 +308,9 @@ function createWorld(random) {
         guard.suspicion = Math.max(0, guard.suspicion - GUARD.suspicionFall * dt);
         if (guard.state === 'alert') {
           guard.lostTimer += dt;
-          if (guard.lostTimer >= GUARD.giveUp) {
+          // Hysteresis (game-ai): a minimum time in alert before giving up,
+          // so the guard never flickers alert/suspicious on the boundary.
+          if (guard.lostTimer >= GUARD.giveUp && guard.stateTime >= 0.4) {
             guard.state = 'suspicious';
             guard.lostTimer = 0;
           }
@@ -301,7 +329,11 @@ function createWorld(random) {
         }
       }
 
-      // Movement for the state the guard is in.
+      // Movement for the state the guard is in. Fairness (game-ai): an
+      // alert guard chases the LAST KNOWN position, not the live player —
+      // break sight and it searches where it last saw you.
+      const prevState = guard.state;
+      guard.moving = false;
       if (guard.state === 'patrol') {
         const target = guard.waypoints[guard.wp];
         const dx = target.x - guard.x;
@@ -313,6 +345,7 @@ function createWorld(random) {
           const step = Math.min(GUARD.patrol * dt, dist);
           moveCircle(level, guard, GUARD.radius, (dx / dist) * step, (dy / dist) * step);
           guard.angle = Math.atan2(dy, dx);
+          guard.moving = true;
         }
       } else if (guard.state === 'suspicious' && guard.lastSeen) {
         const dx = guard.lastSeen.x - guard.x;
@@ -326,17 +359,31 @@ function createWorld(random) {
           const step = Math.min(GUARD.patrol * dt, dist);
           moveCircle(level, guard, GUARD.radius, (dx / dist) * step, (dy / dist) * step);
           guard.angle = Math.atan2(dy, dx);
+          guard.moving = true;
         }
       } else if (guard.state === 'alert') {
-        const dx = p.x - guard.x;
-        const dy = p.y - guard.y;
+        const target = guard.lastSeen || { x: p.x, y: p.y };
+        const dx = target.x - guard.x;
+        const dy = target.y - guard.y;
         const dist = Math.hypot(dx, dy);
-        if (dist > 1) {
+        if (dist < 10 && !sees) {
+          // Lost the trail at the last known spot: scan before giving up.
+          guard.scan += dt;
+          guard.angle += 1.4 * dt;
+          if (guard.scan > 1.5) {
+            guard.state = 'suspicious';
+            guard.scan = 0;
+          }
+        } else if (dist > 1) {
           const step = Math.min(GUARD.chase * dt, dist);
           moveCircle(level, guard, GUARD.radius, (dx / dist) * step, (dy / dist) * step);
+          guard.moving = true;
         }
-        guard.angle = Math.atan2(dy, dx);
+        if (dist > 10) guard.angle = Math.atan2(dy, dx);
       }
+      if (guard.moving) guard.walkPhase += dt * 7;
+      else guard.walkPhase *= 0.9;
+      guard.stateTime = guard.state === prevState ? guard.stateTime + dt : 0;
 
       // A guard touching the thief catches them, whatever the state.
       if (Math.hypot(p.x - guard.x, p.y - guard.y) < GUARD.catchDist) {
@@ -349,6 +396,14 @@ function createWorld(random) {
   function step(dt, input, isTitle) {
     const level = LEVELS[state.levelIndex];
     state.time += dt;
+    // Juice decays in real step time, so every effect returns to rest.
+    state.trauma = Math.max(0, state.trauma - 1.4 * dt);
+    state.creakFlash = Math.max(0, state.creakFlash - dt);
+    for (const f of state.floaters) {
+      f.y -= 24 * dt;
+      f.life -= dt;
+    }
+    state.floaters = state.floaters.filter((f) => f.life > 0);
     if (state.status !== 'playing') {
       for (const part of state.particles) {
         part.x += part.vx * dt;
@@ -391,12 +446,37 @@ function createWorld(random) {
     if (input) {
       p.sneak = !!input.sneak;
       const len = Math.hypot(input.mx, input.my);
+      p.moving = len > 0.01;
       if (len > 0.01) {
         const speed = p.sneak ? PLAYER.sneak : PLAYER.walk;
         const nx = (input.mx / len) * speed * dt;
         const ny = (input.my / len) * speed * dt;
         moveCircle(level, p, PLAYER.radius, nx, ny);
         p.angle = Math.atan2(input.my, input.mx);
+        p.walkPhase += dt * 8;
+      } else {
+        p.walkPhase *= 0.9;
+      }
+    }
+
+    // Creaky floor (level 4): walking across a 'c' tile is loud — nearby
+    // guards hear it and turn suspicious, and the alarm creeps up.
+    // Sneaking across is silent. The mechanic is taught on a safe strip
+    // (row 4) before it is tested under a camera and a patrol.
+    if (input && p.moving && !p.sneak
+      && tileAt(level, Math.floor(p.x / TILE), Math.floor(p.y / TILE)) === 'c') {
+      state.alarm = Math.min(100, state.alarm + CREAK.alarmPerSecond * dt);
+      state.creakFlash = 1.2;
+      events |= EVENT_CREAK;
+      if (random.next() < 0.25) burst(p.x, p.y + 8, '#c9a227', 1);
+      for (const guard of state.guards) {
+        if (Math.hypot(guard.x - p.x, guard.y - p.y) > CREAK.hearRadius) continue;
+        guard.lastSeen = { x: p.x, y: p.y };
+        guard.suspicion = Math.min(1, guard.suspicion + CREAK.suspicionPerSecond * dt);
+        if (guard.suspicion > 0.5 && guard.state === 'patrol') {
+          guard.state = 'suspicious';
+          events |= EVENT_SUSPICIOUS;
+        }
       }
     }
 
@@ -430,6 +510,7 @@ function createWorld(random) {
       state.tripped = true;
       state.tripTimer = ALARM.tripSeconds;
       state.hideTimer = 0;
+      addTrauma(0.65);
       events |= EVENT_TRIP;
     }
     if (state.tripped) {
@@ -457,6 +538,7 @@ function createWorld(random) {
           state.tripped = true;
           state.tripTimer = ALARM.tripSeconds;
           state.hideTimer = 0;
+          addTrauma(0.65);
           events |= EVENT_TRIP;
         }
         break;
@@ -482,16 +564,22 @@ function createWorld(random) {
           best.obj.taken = true;
           state.lootValue += best.obj.value;
           state.score += best.obj.value;
-          burst(best.obj.x, best.obj.y, '#f2c94c', 12);
+          burst(best.obj.x, best.obj.y, '#f2c94c', 16);
+          floater(best.obj.x, best.obj.y - 14, `+$${best.obj.value}`, '#f2c94c');
+          addTrauma(0.18);
           events |= EVENT_PICKUP;
         } else if (best.kind === 'diamond') {
           best.obj.taken = true;
           state.score += SCORE.diamond;
-          burst(best.obj.x, best.obj.y, '#7fe7ff', 20);
+          burst(best.obj.x, best.obj.y, '#7fe7ff', 24);
+          floater(best.obj.x, best.obj.y - 14, `+$${SCORE.diamond}`, '#7fe7ff');
+          addTrauma(0.3);
           events |= EVENT_PICKUP;
         } else {
           state.cameras[best.obj.camera].disabled = CAMERA.disableSeconds;
-          burst(best.obj.x, best.obj.y, '#e5534b', 10);
+          burst(best.obj.x, best.obj.y, '#e5534b', 12);
+          floater(best.obj.x, best.obj.y - 14, 'KAMERA OFF', '#ff8a7a');
+          addTrauma(0.15);
           events |= EVENT_PANEL;
         }
       }
@@ -504,6 +592,7 @@ function createWorld(random) {
       state.ghostBonus = state.everSeen ? 0 : SCORE.ghostBonus;
       state.score += state.timeBonus + state.ghostBonus;
       state.status = state.levelIndex >= LEVELS.length - 1 ? 'final' : 'cleared';
+      addTrauma(0.35);
       events |= EVENT_CLEARED;
     }
 

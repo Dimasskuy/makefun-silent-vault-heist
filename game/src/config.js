@@ -48,6 +48,19 @@ const LASER = {
   tripDist: 11,
 };
 
+/** Creaky floor (new mechanic, level 4): walking across a creaky tile
+ * makes noise — guards nearby hear it and grow suspicious, and the alarm
+ * creeps up. Sneaking across is silent. */
+const CREAK = {
+  alarmPerSecond: 6,
+  hearRadius: 280,
+  // Must beat the guard's suspicion decay (0.85/s) or hearing never lands.
+  suspicionPerSecond: 1.2,
+};
+
+/** Floating score popups (+$300, +$1000) live this long, in seconds. */
+const FLOATER_LIFE = 1.1;
+
 const SCORE = {
   diamond: 1000,
   ghostBonus: 500,
@@ -58,12 +71,18 @@ const PALETTE = {
   backdrop: '#0e1220',
   floorA: '#1a2138',
   floorB: '#171d31',
-  floorGallery: '#1c2438',
-  floorOffice: '#1e2a24',
+  floorGallery: '#232a40',
+  floorOffice: '#232a22',
   floorVault: '#20242e',
+  floorCrown: '#2b1f33',
   wall: '#3a4560',
   wallTop: '#5a6a94',
   wallEdge: '#232a42',
+  trimGold: '#c9a227',
+  marbleVein: 'rgba(200,210,235,0.16)',
+  woodGrain: 'rgba(0,0,0,0.22)',
+  carpet: '#4a2430',
+  carpetTrim: '#c9a227',
   coneGuard: 'rgba(242, 201, 76, 0.20)',
   coneGuardSuspicious: 'rgba(242, 153, 60, 0.28)',
   coneGuardAlert: 'rgba(229, 83, 75, 0.30)',

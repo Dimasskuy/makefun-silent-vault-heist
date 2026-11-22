@@ -1,9 +1,12 @@
-// The three handcrafted heist maps. One string per row, 32 columns by 18 rows.
-//   # wall   . floor   V getaway van   T thief start   D Aurora Diamond
+// The four handcrafted heist maps. One string per row, 32 columns by 18 rows.
+//   # wall   . floor   c creaky floor (walks loud, sneak is silent)
+//   V getaway van   T thief start   D Aurora Diamond
 //   L loot   C camera   P control panel
-// Guards, cameras, lasers and loot values sit beside each map so a level is
-// one self-contained description. All patrol lines are straight and clear of
-// walls; every loot, panel, diamond and the van are reachable from the start.
+// Guards, cameras, lasers, loot values/kinds and decor sit beside each map
+// so a level is one self-contained description. All patrol lines are
+// straight and clear of walls; every loot, panel, diamond and the van are
+// reachable from the start. Loot kinds (row-major, parallel to lootValues):
+// gem, painting, crown, artifact, vase — each drawn differently.
 
 const LEVELS = [
   {
@@ -39,6 +42,13 @@ const LEVELS = [
     panels: [{ x: 10, y: 15, camera: 0 }],
     lasers: [],
     lootValues: [200, 300, 250],
+    lootKinds: ['gem', 'painting', 'gem'],
+    decor: {
+      paintings: [[5, 0], [20, 0]],
+      plants: [[1, 16], [30, 16]],
+      lamps: [[8, 0], [24, 0]],
+      tables: [],
+    },
   },
   {
     name: 'Offices & Archives',
@@ -80,6 +90,13 @@ const LEVELS = [
     ],
     lasers: [],
     lootValues: [200, 250, 300, 200],
+    lootKinds: ['gem', 'vase', 'painting', 'artifact'],
+    decor: {
+      paintings: [[5, 0], [26, 0]],
+      plants: [[1, 16], [30, 2]],
+      lamps: [[10, 0], [22, 0]],
+      tables: [[14, 13], [25, 13]],
+    },
   },
   {
     name: 'The Vault',
@@ -128,6 +145,67 @@ const LEVELS = [
       { x1: 26, y1: 4, x2: 26, y2: 8 },
     ],
     lootValues: [200, 250, 300, 200, 250],
+    lootKinds: ['gem', 'crown', 'painting', 'vase', 'artifact'],
+    decor: {
+      paintings: [[5, 0], [26, 0]],
+      plants: [[1, 16], [30, 16]],
+      lamps: [[8, 0], [24, 0]],
+      tables: [],
+    },
+  },
+  {
+    name: 'The Crown Chamber',
+    sub: 'Level 4 — lantai berderit: tahan Shift saat melintas, mahkota di balik laser',
+    par: 180,
+    tint: 'crown',
+    map: [
+      '################################',
+      '#.........#..........#.........#',
+      '#..V...T..#..........#.....D...#',
+      '#.........#..........#.........#',
+      '#...........cccc.....#.........#',
+      '#.........#....cccc..#.........#',
+      '#....L....#....C.....#.........#',
+      '#.........#.......L..#.....L...#',
+      '#.........#..........#.........#',
+      '#####.###############...C......#',
+      '#..............................#',
+      '#.....L........cccc............#',
+      '#..............##..............#',
+      '#.......#......C............L..#',
+      '#..............................#',
+      '#...........P...........P......#',
+      '#.................P............#',
+      '################################',
+    ],
+    guards: [
+      { waypoints: [[12, 3], [19, 3]] },
+      { waypoints: [[12, 14], [19, 14]] },
+      { waypoints: [[23, 10], [23, 15]] },
+      { waypoints: [[24, 6], [28, 6]] },
+    ],
+    cameras: [
+      { x: 15, y: 6, angle: Math.PI / 2, arc: 0.7, period: 6 },
+      { x: 24, y: 9, angle: -Math.PI / 2, arc: 0.7, period: 7 },
+      { x: 15, y: 13, angle: -Math.PI / 2, arc: 0.7, period: 8 },
+    ],
+    panels: [
+      { x: 12, y: 15, camera: 0 },
+      { x: 24, y: 15, camera: 1 },
+      { x: 18, y: 16, camera: 2 },
+    ],
+    lasers: [
+      { x1: 23, y1: 4, x2: 29, y2: 4 },
+      { x1: 23, y1: 8, x2: 29, y2: 8 },
+      { x1: 26, y1: 4, x2: 26, y2: 8 },
+    ],
+    lootValues: [350, 500, 400, 250, 300],
+    lootKinds: ['painting', 'crown', 'artifact', 'gem', 'vase'],
+    decor: {
+      paintings: [[5, 0], [26, 0]],
+      plants: [[1, 16], [30, 16]],
+      lamps: [[8, 0], [24, 0]],
+      tables: [],
+    },
   },
 ];
-

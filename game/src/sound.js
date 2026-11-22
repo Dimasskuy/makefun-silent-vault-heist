@@ -65,6 +65,10 @@ function createSound() {
     tick() {
       tone(660, 0.06, 'triangle', 0.09);
     },
+    /** A wooden groan when the thief walks across a creaky floorboard. */
+    creak() {
+      tone(180, 0.16, 'sawtooth', 0.05, 0, 90);
+    },
     /** The alarm sting when the meter trips. */
     alarm() {
       tone(220, 0.35, 'sawtooth', 0.08, 0, 440);

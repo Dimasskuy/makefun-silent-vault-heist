@@ -59,6 +59,11 @@ function runGame() {
   let best = readBest();
   let accumulator = 0;
   let last = performance.now();
+  // Hit-stop (game-feel): a real-time freeze after a big event. The world
+  // never steps during it, and the newest event owns the restore — the
+  // freeze is measured in real time, so it always ends.
+  let hitStop = 0;
+  let hitStopId = 0;
   // An E press is an edge: handleActions() reads the actions once per frame,
   // so it hands the press to the next world step instead of dropping it.
   let interactQueued = false;
@@ -76,12 +81,14 @@ function runGame() {
   }
 
   function handleEvents(events) {
-    if (events & EVENT_PICKUP) sound.pickup();
+    if (events & EVENT_PICKUP) { sound.pickup(); freeze(0.05); }
     if (events & EVENT_PANEL) sound.panel();
     if (events & EVENT_SUSPICIOUS) sound.tick();
-    if (events & EVENT_TRIP) sound.alarm();
+    if (events & EVENT_CREAK) sound.creak();
+    if (events & EVENT_TRIP) { sound.alarm(); freeze(0.09); }
     if (events & EVENT_BUSTED) {
       sound.busted();
+      freeze(0.13);
       screen = SCREEN_BUSTED;
       if (world.state.score > best) {
         best = world.state.score;
@@ -90,6 +97,7 @@ function runGame() {
       announce(`Busted. Score ${world.state.score}.`);
     } else if (events & EVENT_CLEARED) {
       sound.success();
+      freeze(0.06);
       screen = world.state.status === 'final' ? SCREEN_FINAL : SCREEN_CLEARED;
       if (world.state.score > best) {
         best = world.state.score;
@@ -99,6 +107,17 @@ function runGame() {
         ? `Heist complete. Final score ${world.state.score}.`
         : `Level clear. Score ${world.state.score}.`);
     }
+  }
+
+  function freeze(seconds) {
+    hitStopId += 1;
+    const myId = hitStopId;
+    hitStop = Math.max(hitStop, seconds);
+    // Only the newest freeze may clear it: an older timer must not end a
+    // newer freeze early.
+    setTimeout(() => {
+      if (myId === hitStopId) hitStop = 0;
+    }, seconds * 1000);
   }
 
   function handleActions() {
@@ -169,10 +188,14 @@ function runGame() {
 
   function frame(now) {
     requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
+    const realDt = Math.min((now - last) / 1000, MAX_FRAME);
     last = now;
     handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_INTRO || screen === SCREEN_PLAY) {
+    if (hitStop > 0) {
+      hitStop -= realDt;
+      accumulator = 0;
+    } else if (screen === SCREEN_TITLE || screen === SCREEN_INTRO || screen === SCREEN_PLAY) {
+      accumulator += realDt;
       while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_INTRO || screen === SCREEN_PLAY)) {
         step();
         accumulator -= STEP;
