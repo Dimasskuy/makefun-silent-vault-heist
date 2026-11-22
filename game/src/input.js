@@ -1,83 +1,98 @@
-// Keyboard and pointer input. Held keys give a steering vector; one-shot presses
-// (interact, restart, mute, confirm, pause) are queued as bit flags and taken once by
-// the loop, so a press between two frames is never lost and never counted twice.
+// Keyboard and click input. Movement keys are read as a held state each
+// frame; action keys (confirm, pause, restart, mute, interact) are edges:
+// takeActions() returns them once and clears them.
 
 export const ACTION_CONFIRM = 1;
 export const ACTION_PAUSE = 2;
-export const ACTION_INTERACT = 4;
-export const ACTION_RESTART = 8;
-export const ACTION_MUTE = 16;
+export const ACTION_RESTART = 4;
+export const ACTION_MUTE = 8;
+export const ACTION_INTERACT = 16;
 
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-const INTERACT = new Set(['KeyE']);
-const RESTART = new Set(['KeyR']);
-const MUTE = new Set(['KeyM']);
-const SNEAK = new Set(['ShiftLeft', 'ShiftRight']);
+const MOVE_KEYS = {
+  KeyW: [0, -1],
+  ArrowUp: [0, -1],
+  KeyS: [0, 1],
+  ArrowDown: [0, 1],
+  KeyA: [-1, 0],
+  ArrowLeft: [-1, 0],
+  KeyD: [1, 0],
+  ArrowRight: [1, 0],
+};
 
-export function createInput(target) {
-  const held = { up: false, down: false, left: false, right: false, sneak: false };
+function createInput(canvas) {
+  const held = new Set();
   let actions = 0;
+  let interactHeld = false;
 
-  window.addEventListener('keydown', (event) => {
-    if (UP.has(event.code)) held.up = true;
-    else if (DOWN.has(event.code)) held.down = true;
-    else if (LEFT.has(event.code)) held.left = true;
-    else if (RIGHT.has(event.code)) held.right = true;
-    else if (SNEAK.has(event.code)) held.sneak = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else if (INTERACT.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_INTERACT;
-    } else if (RESTART.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_RESTART;
-    } else if (MUTE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_MUTE;
-    } else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (UP.has(event.code)) held.up = false;
-    else if (DOWN.has(event.code)) held.down = false;
-    else if (LEFT.has(event.code)) held.left = false;
-    else if (RIGHT.has(event.code)) held.right = false;
-    else if (SNEAK.has(event.code)) held.sneak = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    held.up = false;
-    held.down = false;
-    held.left = false;
-    held.right = false;
-    held.sneak = false;
-  });
-  target.addEventListener('pointerdown', () => {
+  function keyDown(event) {
+    if (event.repeat) {
+      if (MOVE_KEYS[event.code]) event.preventDefault();
+      return;
+    }
+    if (MOVE_KEYS[event.code]) {
+      held.add(event.code);
+      event.preventDefault();
+    } else if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
+      held.add(event.code);
+    } else if (event.code === 'Enter' || event.code === 'Space') {
+      actions |= ACTION_CONFIRM;
+      event.preventDefault();
+    } else if (event.code === 'KeyP' || event.code === 'Escape') {
+      actions |= ACTION_PAUSE;
+    } else if (event.code === 'KeyR') {
+      actions |= ACTION_RESTART;
+    } else if (event.code === 'KeyM') {
+      actions |= ACTION_MUTE;
+    } else if (event.code === 'KeyE') {
+      actions |= ACTION_INTERACT;
+      interactHeld = true;
+    }
+  }
+
+  function keyUp(event) {
+    held.delete(event.code);
+    if (event.code === 'KeyE') interactHeld = false;
+  }
+
+  function click() {
     actions |= ACTION_CONFIRM;
-  });
+  }
+
+  window.addEventListener('keydown', keyDown);
+  window.addEventListener('keyup', keyUp);
+  canvas.addEventListener('pointerdown', click);
 
   return {
-    /** Normalised steering vector: {mx, my}, each -1..1. */
-    vector() {
-      const mx = (held.right ? 1 : 0) - (held.left ? 1 : 0);
-      const my = (held.down ? 1 : 0) - (held.up ? 1 : 0);
+    /** Normalised movement vector from the held keys. */
+    direction() {
+      let mx = 0;
+      let my = 0;
+      for (const code of held) {
+        const d = MOVE_KEYS[code];
+        if (d) {
+          mx += d[0];
+          my += d[1];
+        }
+      }
       const len = Math.hypot(mx, my);
-      if (len === 0) return { mx: 0, my: 0 };
-      return { mx: mx / len, my: my / len };
+      if (len > 0) {
+        mx /= len;
+        my /= len;
+      }
+      return { mx, my };
     },
     sneak() {
-      return held.sneak;
+      return held.has('ShiftLeft') || held.has('ShiftRight');
     },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
+    interactPressed() {
+      return interactHeld;
+    },
     takeActions() {
-      const taken = actions;
+      const out = actions;
       actions = 0;
-      return taken;
+      return out;
     },
   };
 }
+
+export { createInput };

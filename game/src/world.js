@@ -1,565 +1,546 @@
-// The game's rules and state, with no drawing and no browser in it: the thief, the
-// patrolling guards and their vision cones, the sweeping cameras, the alarm meter,
-// the laser grid, the loot and the diamond, the win and the lose. step() advances one
-// fixed step and returns what happened as bit flags, so the caller can react (sounds,
-// screens) without the world knowing about them. Nothing here allocates after
-// createWorld returns, except the small cone polygons the renderer asks for.
-import { ALARM, COLS, FIELD, GHOST_BONUS, GUARD, CAMERA, PLAYER, ROWS, STEP, TILE, TIME_BONUS_PER_SECOND } from './config.js';
+// The rules of SILENT VAULT, no drawing here. The world is stepped in fixed
+// 1/60 s slices by main.js; every rule is a pure function of the state, so a
+// seeded run replays exactly the same way.
+import { TILE, FIELD, PLAYER, GUARD, CAMERA, ALARM, LASER, SCORE } from './config.js';
 import { LEVELS } from './levels.js';
 
+export const EVENT_NONE = 0;
 export const EVENT_PICKUP = 1;
-export const EVENT_DIAMOND = 2;
-export const EVENT_PANEL = 4;
-export const EVENT_SUSPICIOUS = 8;
-export const EVENT_ALARM_TRIP = 16;
-export const EVENT_DISARM = 32;
-export const EVENT_LASER = 64;
-export const EVENT_BUSTED = 128;
-export const EVENT_CLEARED = 256;
-export const EVENT_SEEN = 512;
+export const EVENT_PANEL = 2;
+export const EVENT_SUSPICIOUS = 4;
+export const EVENT_TRIP = 8;
+export const EVENT_BUSTED = 16;
+export const EVENT_CLEARED = 32;
 
-const CONE_RAYS = 26;
-const LOS_STEP = 7;
+const TAU = Math.PI * 2;
+
+function wrapAngle(a) {
+  while (a > Math.PI) a -= TAU;
+  while (a < -Math.PI) a += TAU;
+  return a;
+}
 
 function tileCenter(tx, ty) {
   return { x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2 };
 }
 
-function angleDiff(a, b) {
-  let d = a - b;
-  while (d > Math.PI) d -= Math.PI * 2;
-  while (d < -Math.PI) d += Math.PI * 2;
-  return d;
+function tileAt(level, tx, ty) {
+  if (ty < 0 || ty >= level.map.length) return '#';
+  const row = level.map[ty];
+  if (tx < 0 || tx >= row.length) return '#';
+  return row[tx];
 }
 
-/** Distance from a point to a line segment (for the laser tripwires). */
+function isWallTile(level, tx, ty) {
+  return tileAt(level, tx, ty) === '#';
+}
+
+function pointInWall(level, px, py) {
+  return isWallTile(level, Math.floor(px / TILE), Math.floor(py / TILE));
+}
+
+/** True when no wall tile stands between the two points (sampled every 6 px). */
+function hasLineOfSight(level, x0, y0, x1, y1) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const dist = Math.hypot(dx, dy);
+  const steps = Math.max(1, Math.ceil(dist / 6));
+  for (let i = 1; i < steps; i += 1) {
+    const t = i / steps;
+    if (pointInWall(level, x0 + dx * t, y0 + dy * t)) return false;
+  }
+  return true;
+}
+
+/** A cone (origin, facing, range, half-angle) sees a point when it is inside
+ * the angle, inside the range and the line of sight is not walled off. */
+function coneSees(level, ox, oy, angle, range, halfAngle, tx, ty) {
+  const dx = tx - ox;
+  const dy = ty - oy;
+  const dist = Math.hypot(dx, dy);
+  if (dist > range) return false;
+  if (dist < 1) return true;
+  if (Math.abs(wrapAngle(Math.atan2(dy, dx) - angle)) > halfAngle) return false;
+  return hasLineOfSight(level, ox, oy, tx, ty);
+}
+
+/** Distance from a point to a line segment, in pixels. */
 function distToSegment(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1;
   const dy = y2 - y1;
   const len2 = dx * dx + dy * dy;
   let t = len2 === 0 ? 0 : ((px - x1) * dx + (py - y1) * dy) / len2;
   t = Math.max(0, Math.min(1, t));
-  const cx = x1 + t * dx;
-  const cy = y1 + t * dy;
+  const cx = x1 + dx * t;
+  const cy = y1 + dy * t;
   return Math.hypot(px - cx, py - cy);
 }
 
-export function createWorld(random) {
+/** Slide a circle through the tile map: move on x, then on y, stopping the
+ * axis that would push the circle into a wall. */
+function moveCircle(level, pos, radius, dx, dy) {
+  const hitsWall = (x, y) => {
+    const minTx = Math.floor((x - radius) / TILE);
+    const maxTx = Math.floor((x + radius) / TILE);
+    const minTy = Math.floor((y - radius) / TILE);
+    const maxTy = Math.floor((y + radius) / TILE);
+    for (let ty = minTy; ty <= maxTy; ty += 1) {
+      for (let tx = minTx; tx <= maxTx; tx += 1) {
+        if (!isWallTile(level, tx, ty)) continue;
+        const cx = Math.max(tx * TILE, Math.min(x, tx * TILE + TILE));
+        const cy = Math.max(ty * TILE, Math.min(y, ty * TILE + TILE));
+        if (Math.hypot(x - cx, y - cy) < radius) return true;
+      }
+    }
+    return false;
+  };
+  if (dx !== 0 && !hitsWall(pos.x + dx, pos.y)) pos.x += dx;
+  if (dy !== 0 && !hitsWall(pos.x, pos.y + dy)) pos.y += dy;
+}
+
+/** Breadth-first path over floor tiles, as a list of tile centres. */
+function findPath(level, sx, sy, tx, ty) {
+  if (isWallTile(level, tx, ty)) return null;
+  const key = (x, y) => `${x},${y}`;
+  const prev = new Map([[key(sx, sy), null]]);
+  const queue = [[sx, sy]];
+  while (queue.length) {
+    const [x, y] = queue.shift();
+    if (x === tx && y === ty) break;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (isWallTile(level, nx, ny) || prev.has(key(nx, ny))) continue;
+      prev.set(key(nx, ny), [x, y]);
+      queue.push([nx, ny]);
+    }
+  }
+  if (!prev.has(key(tx, ty))) return null;
+  const path = [];
+  let cur = [tx, ty];
+  while (cur) {
+    path.unshift(tileCenter(cur[0], cur[1]));
+    cur = prev.get(key(cur[0], cur[1]));
+  }
+  return path;
+}
+
+function findMarker(level, ch) {
+  for (let y = 0; y < level.map.length; y += 1) {
+    for (let x = 0; x < level.map[y].length; x += 1) {
+      if (level.map[y][x] === ch) return { x, y };
+    }
+  }
+  return null;
+}
+
+function createWorld(random) {
   const state = {
     levelIndex: 0,
-    level: LEVELS[0],
-    grid: [],
-    player: { x: 0, y: 0, angle: 0, sneak: false, moving: false },
+    status: 'playing',
+    time: 0,
+    elapsed: 0,
+    player: { x: 0, y: 0, angle: 0, sneak: false },
     guards: [],
     cameras: [],
-    panels: [],
     loot: [],
-    diamond: { x: 0, y: 0, taken: false },
-    van: { x: 0, y: 0 },
+    diamond: null,
+    panels: [],
+    van: null,
     lasers: [],
     alarm: 0,
     tripped: false,
     tripTimer: 0,
-    hiddenTimer: 0,
-    elapsed: 0,
-    lootValue: 0,
-    lootTaken: 0,
-    seenTime: 0,
+    hideTimer: 0,
     everSeen: false,
-    status: 'playing',
-    bustedReason: '',
     score: 0,
+    lootValue: 0,
     timeBonus: 0,
     ghostBonus: 0,
+    bustedReason: '',
+    particles: [],
   };
 
-  function loadLevel(index) {
-    const level = LEVELS[index];
-    state.levelIndex = index;
-    state.level = level;
-    state.grid = level.map.map((row) => row.split(''));
-    state.guards = [];
-    state.cameras = [];
-    state.panels = [];
-    state.loot = [];
-    state.lasers = level.lasers.map((laser) => ({
-      x1: laser.x1 * TILE + TILE / 2,
-      y1: laser.y1 * TILE + TILE / 2,
-      x2: laser.x2 * TILE + TILE / 2,
-      y2: laser.y2 * TILE + TILE / 2,
-    }));
-    let lootIndex = 0;
-    for (let ty = 0; ty < ROWS; ty += 1) {
-      for (let tx = 0; tx < COLS; tx += 1) {
-        const ch = state.grid[ty][tx];
-        const c = tileCenter(tx, ty);
-        if (ch === 'T') {
-          state.player.x = c.x;
-          state.player.y = c.y;
-          state.player.angle = 0;
-          state.grid[ty][tx] = '.';
-        } else if (ch === 'V') {
-          state.van = { x: c.x, y: c.y };
-          state.grid[ty][tx] = '.';
-        } else if (ch === 'D') {
-          state.diamond = { x: c.x, y: c.y, taken: false };
-          state.grid[ty][tx] = '.';
-        } else if (ch === 'L') {
-          state.loot.push({ x: c.x, y: c.y, value: level.lootValues[lootIndex] ?? 100, taken: false });
-          lootIndex += 1;
-          state.grid[ty][tx] = '.';
-        } else if (ch === 'P') {
-          state.panels.push({ x: c.x, y: c.y, cameraIndex: -1 });
-          state.grid[ty][tx] = '.';
-        } else if (ch === 'C') {
-          state.grid[ty][tx] = '.';
-        }
+  function reset(levelIndex) {
+    const level = LEVELS[levelIndex];
+    state.levelIndex = levelIndex;
+    state.status = 'playing';
+    state.time = 0;
+    state.elapsed = 0;
+    const start = findMarker(level, 'T');
+    const sp = tileCenter(start.x, start.y);
+    state.player = { x: sp.x, y: sp.y, angle: 0, sneak: false };
+    state.guards = level.guards.map((g) => {
+      const wps = g.waypoints.map(([tx, ty]) => tileCenter(tx, ty));
+      const next = wps[1] ?? wps[0];
+      return {
+        x: wps[0].x,
+        y: wps[0].y,
+        angle: Math.atan2(next.y - wps[0].y, next.x - wps[0].x),
+        waypoints: wps,
+        wp: 1 % wps.length,
+        state: 'patrol',
+        suspicion: 0,
+        lastSeen: null,
+        lostTimer: 0,
+        scan: 0,
+      };
+    });
+    state.cameras = level.cameras.map((c, i) => {
+      const p = tileCenter(c.x, c.y);
+      return {
+        x: p.x,
+        y: p.y,
+        baseAngle: c.angle,
+        arc: c.arc,
+        period: c.period,
+        angle: c.angle,
+        disabled: 0,
+        phase: i * 1.7,
+      };
+    });
+    const lootTiles = [];
+    for (let y = 0; y < level.map.length; y += 1) {
+      for (let x = 0; x < level.map[y].length; x += 1) {
+        if (level.map[y][x] === 'L') lootTiles.push([x, y]);
       }
     }
-    for (const def of level.guards) {
-      const start = tileCenter(def.waypoints[0][0], def.waypoints[0][1]);
-      const next = tileCenter(def.waypoints[1][0], def.waypoints[1][1]);
-      state.guards.push({
-        x: start.x,
-        y: start.y,
-        radius: GUARD.radius,
-        waypoints: def.waypoints.map(([wx, wy]) => tileCenter(wx, wy)),
-        wpIndex: 1,
-        wpDir: 1,
-        angle: Math.atan2(next.y - start.y, next.x - start.x),
-        suspicion: 0,
-        state: 'patrol',
-        loseTimer: 0,
-        speed: GUARD.patrolSpeed,
-        lastSeen: { x: start.x, y: start.y },
-      });
-    }
-    level.cameras.forEach((def, index) => {
-      const c = tileCenter(def.x, def.y);
-      state.cameras.push({
-        x: c.x,
-        y: c.y,
-        baseAngle: def.baseAngle,
-        arc: def.arc,
-        period: def.period,
-        range: def.range,
-        phase: random() * Math.PI * 2,
-        angle: def.baseAngle,
-        disabled: 0,
-      });
-      void index;
+    state.loot = lootTiles.map(([tx, ty], i) => {
+      const p = tileCenter(tx, ty);
+      return { x: p.x, y: p.y, value: level.lootValues[i], taken: false };
     });
-    // Each panel controls its nearest camera.
-    for (const panel of state.panels) {
-      let best = -1;
-      let bestDist = Infinity;
-      state.cameras.forEach((camera, index) => {
-        const d = Math.hypot(camera.x - panel.x, camera.y - panel.y);
-        if (d < bestDist) {
-          bestDist = d;
-          best = index;
-        }
-      });
-      panel.cameraIndex = best;
-    }
+    const d = findMarker(level, 'D');
+    const dp = tileCenter(d.x, d.y);
+    state.diamond = { x: dp.x, y: dp.y, taken: false };
+    state.panels = level.panels.map((p) => {
+      const pp = tileCenter(p.x, p.y);
+      return { x: pp.x, y: pp.y, camera: p.camera };
+    });
+    const v = findMarker(level, 'V');
+    state.van = tileCenter(v.x, v.y);
+    state.lasers = level.lasers.map((lz) => {
+      const a = tileCenter(lz.x1, lz.y1);
+      const b = tileCenter(lz.x2, lz.y2);
+      return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+    });
     state.alarm = 0;
     state.tripped = false;
     state.tripTimer = 0;
-    state.hiddenTimer = 0;
-    state.elapsed = 0;
-    state.lootValue = 0;
-    state.lootTaken = 0;
-    state.seenTime = 0;
+    state.hideTimer = 0;
     state.everSeen = false;
-    state.status = 'playing';
-    state.bustedReason = '';
-    state.score = 0;
+    state.lootValue = 0;
     state.timeBonus = 0;
     state.ghostBonus = 0;
+    state.bustedReason = '';
+    state.particles = [];
   }
 
-  function isWallTile(tx, ty) {
-    if (tx < 0 || ty < 0 || tx >= COLS || ty >= ROWS) return true;
-    return state.grid[ty][tx] === '#';
-  }
-
-  function isWallPx(x, y) {
-    return isWallTile(Math.floor(x / TILE), Math.floor(y / TILE));
-  }
-
-  /** True when the segment between the two points crosses no wall. */
-  function hasLineOfSight(x0, y0, x1, y1) {
-    const dist = Math.hypot(x1 - x0, y1 - y0);
-    const steps = Math.max(1, Math.ceil(dist / LOS_STEP));
-    for (let i = 1; i < steps; i += 1) {
-      const t = i / steps;
-      if (isWallPx(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)) return false;
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n; i += 1) {
+      const a = random.next() * TAU;
+      const sp = 30 + random.next() * 90;
+      state.particles.push({
+        x,
+        y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        life: 0.5 + random.next() * 0.4,
+        color,
+      });
     }
-    return true;
   }
 
-  /** Is the thief inside this observer's cone (range, angle, line of sight)? */
-  function coneSees(ox, oy, angle, range, halfAngle, px, py) {
-    const dx = px - ox;
-    const dy = py - oy;
-    const dist = Math.hypot(dx, dy);
-    if (dist > range) return false;
-    if (Math.abs(angleDiff(Math.atan2(dy, dx), angle)) > halfAngle) return false;
-    return hasLineOfSight(ox, oy, px, py);
+  function bust(reason) {
+    if (state.status !== 'playing') return EVENT_NONE;
+    state.status = 'busted';
+    state.bustedReason = reason;
+    return EVENT_BUSTED;
   }
 
-  /** The visible part of a cone: a polygon whose rays stop at the first wall. */
-  function conePolygon(ox, oy, angle, range, halfAngle) {
-    const points = [{ x: ox, y: oy }];
-    for (let i = 0; i <= CONE_RAYS; i += 1) {
-      const a = angle - halfAngle + (2 * halfAngle * i) / CONE_RAYS;
-      const dx = Math.cos(a);
-      const dy = Math.sin(a);
-      let reach = range;
-      for (let d = 8; d <= range; d += 8) {
-        if (isWallPx(ox + dx * d, oy + dy * d)) {
-          reach = d - 8;
-          break;
+  function stepGuards(dt, level) {
+    let events = EVENT_NONE;
+    for (const guard of state.guards) {
+      const p = state.player;
+      const sees = coneSees(
+        level, guard.x, guard.y, guard.angle,
+        GUARD.visionRange, GUARD.visionHalfAngle, p.x, p.y,
+      );
+      if (sees) {
+        state.everSeen = true;
+        guard.lastSeen = { x: p.x, y: p.y };
+        guard.lostTimer = 0;
+        const dist = Math.hypot(p.x - guard.x, p.y - guard.y);
+        const proximity = Math.max(0.3, 1.5 - dist / GUARD.visionRange);
+        const sneak = p.sneak ? GUARD.sneakFactor : 1;
+        guard.suspicion = Math.min(1, guard.suspicion + GUARD.suspicionRise * proximity * sneak * dt);
+        if (guard.suspicion >= 1 && guard.state !== 'alert') {
+          guard.state = 'alert';
+          events |= EVENT_SUSPICIOUS;
+        } else if (guard.suspicion > 0.5 && guard.state === 'patrol') {
+          guard.state = 'suspicious';
+          events |= EVENT_SUSPICIOUS;
+        }
+      } else {
+        guard.suspicion = Math.max(0, guard.suspicion - GUARD.suspicionFall * dt);
+        if (guard.state === 'alert') {
+          guard.lostTimer += dt;
+          if (guard.lostTimer >= GUARD.giveUp) {
+            guard.state = 'suspicious';
+            guard.lostTimer = 0;
+          }
+        } else if (guard.state === 'suspicious' && guard.suspicion < 0.35) {
+          guard.state = 'patrol';
+          let best = 0;
+          let bestDist = Infinity;
+          guard.waypoints.forEach((w, i) => {
+            const d = Math.hypot(w.x - guard.x, w.y - guard.y);
+            if (d < bestDist) {
+              bestDist = d;
+              best = i;
+            }
+          });
+          guard.wp = best;
         }
       }
-      points.push({ x: ox + dx * Math.max(0, reach), y: oy + dy * Math.max(0, reach) });
-    }
-    return points;
-  }
 
-  /** Move a circle against the walls, one axis at a time so it slides along them. */
-  function moveCircle(entity, dx, dy) {
-    const r = entity.radius ?? PLAYER.radius;
-    const nx = entity.x + dx;
-    if (!circleHitsWall(nx, entity.y, r)) entity.x = nx;
-    const ny = entity.y + dy;
-    if (!circleHitsWall(entity.x, ny, r)) entity.y = ny;
-  }
+      // Movement for the state the guard is in.
+      if (guard.state === 'patrol') {
+        const target = guard.waypoints[guard.wp];
+        const dx = target.x - guard.x;
+        const dy = target.y - guard.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 5) {
+          guard.wp = (guard.wp + 1) % guard.waypoints.length;
+        } else {
+          const step = Math.min(GUARD.patrol * dt, dist);
+          moveCircle(level, guard, GUARD.radius, (dx / dist) * step, (dy / dist) * step);
+          guard.angle = Math.atan2(dy, dx);
+        }
+      } else if (guard.state === 'suspicious' && guard.lastSeen) {
+        const dx = guard.lastSeen.x - guard.x;
+        const dy = guard.lastSeen.y - guard.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 8) {
+          // Reached the spot: look around for the thief.
+          guard.scan += dt;
+          guard.angle += 1.1 * dt;
+        } else {
+          const step = Math.min(GUARD.patrol * dt, dist);
+          moveCircle(level, guard, GUARD.radius, (dx / dist) * step, (dy / dist) * step);
+          guard.angle = Math.atan2(dy, dx);
+        }
+      } else if (guard.state === 'alert') {
+        const dx = p.x - guard.x;
+        const dy = p.y - guard.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 1) {
+          const step = Math.min(GUARD.chase * dt, dist);
+          moveCircle(level, guard, GUARD.radius, (dx / dist) * step, (dy / dist) * step);
+        }
+        guard.angle = Math.atan2(dy, dx);
+      }
 
-  function circleHitsWall(x, y, r) {
-    const x0 = Math.floor((x - r) / TILE);
-    const x1 = Math.floor((x + r) / TILE);
-    const y0 = Math.floor((y - r) / TILE);
-    const y1 = Math.floor((y + r) / TILE);
-    for (let ty = y0; ty <= y1; ty += 1) {
-      for (let tx = x0; tx <= x1; tx += 1) {
-        if (!isWallTile(tx, ty)) continue;
-        const cx = Math.max(tx * TILE, Math.min(x, tx * TILE + TILE));
-        const cy = Math.max(ty * TILE, Math.min(y, ty * TILE + TILE));
-        if ((x - cx) * (x - cx) + (y - cy) * (y - cy) < r * r) return true;
+      // A guard touching the thief catches them, whatever the state.
+      if (Math.hypot(p.x - guard.x, p.y - guard.y) < GUARD.catchDist) {
+        events |= bust('caught');
       }
     }
-    return false;
+    return events;
   }
 
-  function reset() {
-    loadLevel(state.levelIndex);
+  function step(dt, input, isTitle) {
+    const level = LEVELS[state.levelIndex];
+    state.time += dt;
+    if (state.status !== 'playing') {
+      for (const part of state.particles) {
+        part.x += part.vx * dt;
+        part.y += part.vy * dt;
+        part.life -= dt;
+      }
+      state.particles = state.particles.filter((part) => part.life > 0);
+      return EVENT_NONE;
+    }
+    let events = EVENT_NONE;
+
+    // Cameras sweep; a disabled one stays dark until its timer runs out.
+    for (const cam of state.cameras) {
+      if (cam.disabled > 0) cam.disabled -= dt;
+      cam.angle = cam.baseAngle + cam.arc * Math.sin((TAU * state.time) / cam.period + cam.phase);
+    }
+
+    if (isTitle) {
+      // The title screen shows the museum alive: guards walk, cameras sweep,
+      // but nothing can see or catch the thief.
+      for (const guard of state.guards) {
+        const target = guard.waypoints[guard.wp];
+        const dx = target.x - guard.x;
+        const dy = target.y - guard.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 5) guard.wp = (guard.wp + 1) % guard.waypoints.length;
+        else {
+          const step = Math.min(GUARD.patrol * dt, dist);
+          moveCircle(level, guard, GUARD.radius, (dx / dist) * step, (dy / dist) * step);
+          guard.angle = Math.atan2(dy, dx);
+        }
+      }
+      return EVENT_NONE;
+    }
+
+    state.elapsed += dt;
+    const p = state.player;
+
+    // The thief moves; sneak is slower and harder to notice.
+    if (input) {
+      p.sneak = !!input.sneak;
+      const len = Math.hypot(input.mx, input.my);
+      if (len > 0.01) {
+        const speed = p.sneak ? PLAYER.sneak : PLAYER.walk;
+        const nx = (input.mx / len) * speed * dt;
+        const ny = (input.my / len) * speed * dt;
+        moveCircle(level, p, PLAYER.radius, nx, ny);
+        p.angle = Math.atan2(input.my, input.mx);
+      }
+    }
+
+    // Who sees the thief right now?
+    let seenByCamera = false;
+    let seenByGuardSuspicious = false;
+    let seenByGuardAlert = false;
+    for (const cam of state.cameras) {
+      if (cam.disabled > 0) continue;
+      if (coneSees(level, cam.x, cam.y, cam.angle, CAMERA.range, CAMERA.halfAngle, p.x, p.y)) {
+        seenByCamera = true;
+        state.everSeen = true;
+      }
+    }
+    for (const guard of state.guards) {
+      if (!coneSees(level, guard.x, guard.y, guard.angle, GUARD.visionRange, GUARD.visionHalfAngle, p.x, p.y)) continue;
+      if (guard.state === 'alert') seenByGuardAlert = true;
+      else if (guard.state === 'suspicious') seenByGuardSuspicious = true;
+    }
+    const seen = seenByCamera || seenByGuardSuspicious || seenByGuardAlert
+      || state.guards.some((g) => g.state === 'patrol' && coneSees(level, g.x, g.y, g.angle, GUARD.visionRange, GUARD.visionHalfAngle, p.x, p.y));
+
+    // The alarm fills while seen (sneaking slows it) and drains when hidden.
+    if (seenByCamera) state.alarm += (p.sneak ? ALARM.cameraSneak : ALARM.cameraStand) * dt;
+    if (seenByGuardSuspicious) state.alarm += ALARM.guardSuspicious * dt;
+    if (seenByGuardAlert) state.alarm += ALARM.guardAlert * dt;
+    if (!seen) state.alarm = Math.max(0, state.alarm - ALARM.decay * dt);
+    state.alarm = Math.min(100, state.alarm);
+
+    if (state.alarm >= 100 && !state.tripped) {
+      state.tripped = true;
+      state.tripTimer = ALARM.tripSeconds;
+      state.hideTimer = 0;
+      events |= EVENT_TRIP;
+    }
+    if (state.tripped) {
+      state.tripTimer -= dt;
+      if (!seen) state.hideTimer += dt;
+      else state.hideTimer = 0;
+      if (state.hideTimer >= ALARM.hideToDisarm) {
+        state.tripped = false;
+        state.alarm = ALARM.disarmLevel;
+        state.hideTimer = 0;
+      } else if (state.tripTimer <= 0) {
+        events |= bust('alarm');
+        return events;
+      }
+    }
+
+    events |= stepGuards(dt, level);
+    if (state.status !== 'playing') return events;
+
+    // Lasers: touching a beam trips the alarm at once.
+    for (const lz of state.lasers) {
+      if (distToSegment(p.x, p.y, lz.x1, lz.y1, lz.x2, lz.y2) < PLAYER.radius + LASER.tripDist) {
+        if (!state.tripped) {
+          state.alarm = 100;
+          state.tripped = true;
+          state.tripTimer = ALARM.tripSeconds;
+          state.hideTimer = 0;
+          events |= EVENT_TRIP;
+        }
+        break;
+      }
+    }
+
+    // Interact: the nearest thing in reach — loot, the diamond, a panel.
+    if (input && input.interact) {
+      let best = null;
+      let bestDist = 36;
+      const consider = (obj, kind) => {
+        const d = Math.hypot(obj.x - p.x, obj.y - p.y);
+        if (d < bestDist) {
+          bestDist = d;
+          best = { obj, kind };
+        }
+      };
+      for (const item of state.loot) if (!item.taken) consider(item, 'loot');
+      if (!state.diamond.taken) consider(state.diamond, 'diamond');
+      for (const panel of state.panels) consider(panel, 'panel');
+      if (best) {
+        if (best.kind === 'loot') {
+          best.obj.taken = true;
+          state.lootValue += best.obj.value;
+          state.score += best.obj.value;
+          burst(best.obj.x, best.obj.y, '#f2c94c', 12);
+          events |= EVENT_PICKUP;
+        } else if (best.kind === 'diamond') {
+          best.obj.taken = true;
+          state.score += SCORE.diamond;
+          burst(best.obj.x, best.obj.y, '#7fe7ff', 20);
+          events |= EVENT_PICKUP;
+        } else {
+          state.cameras[best.obj.camera].disabled = CAMERA.disableSeconds;
+          burst(best.obj.x, best.obj.y, '#e5534b', 10);
+          events |= EVENT_PANEL;
+        }
+      }
+    }
+
+    // The getaway: diamond in hand, reach the van.
+    if (state.diamond.taken && Math.hypot(p.x - state.van.x, p.y - state.van.y) < 44) {
+      const under = Math.max(0, level.par - state.elapsed);
+      state.timeBonus = Math.round(under * SCORE.timeBonusPerSecond);
+      state.ghostBonus = state.everSeen ? 0 : SCORE.ghostBonus;
+      state.score += state.timeBonus + state.ghostBonus;
+      state.status = state.levelIndex >= LEVELS.length - 1 ? 'final' : 'cleared';
+      events |= EVENT_CLEARED;
+    }
+
+    for (const part of state.particles) {
+      part.x += part.vx * dt;
+      part.y += part.vy * dt;
+      part.life -= dt;
+    }
+    state.particles = state.particles.filter((part) => part.life > 0);
+    return events;
   }
 
   function nextLevel() {
     if (state.levelIndex + 1 < LEVELS.length) {
-      loadLevel(state.levelIndex + 1);
+      reset(state.levelIndex + 1);
       return true;
     }
     return false;
   }
 
-  function finishScore() {
-    state.timeBonus = Math.max(0, Math.round((state.level.par - state.elapsed) * TIME_BONUS_PER_SECOND));
-    state.ghostBonus = state.everSeen ? 0 : GHOST_BONUS;
-    state.score = state.lootValue + (state.diamond.taken ? 1000 : 0) + state.timeBonus + state.ghostBonus;
-  }
+  reset(0);
 
-  function bust(reason) {
-    if (state.status !== 'playing') return EVENT_BUSTED;
-    state.status = 'busted';
-    state.bustedReason = reason;
-    finishScore();
-    return EVENT_BUSTED;
-  }
-
-  /**
-   * One fixed step. `input` is {mx, my, sneak, interact} (null on the title screen's
-   * ambient backdrop). Returns what happened as EVENT_* flags.
-   */
-  function step(dt, input, ambient) {
-    let events = 0;
-    const player = state.player;
-    state.elapsed += dt;
-
-    // Cameras sweep (and count down their disable) on every screen.
-    for (const camera of state.cameras) {
-      if (camera.disabled > 0) camera.disabled = Math.max(0, camera.disabled - dt);
-      const t = state.elapsed + camera.phase;
-      camera.angle = camera.baseAngle + camera.arc * Math.sin((t / camera.period) * Math.PI * 2);
-    }
-    // Guards patrol on every screen, so the title backdrop is alive.
-    for (const guard of state.guards) {
-      if (guard.state === 'patrol') {
-        const target = guard.waypoints[guard.wpIndex];
-        const dx = target.x - guard.x;
-        const dy = target.y - guard.y;
-        const dist = Math.hypot(dx, dy);
-        const stepLen = GUARD.patrolSpeed * dt;
-        if (dist <= Math.max(stepLen, 2)) {
-          guard.x = target.x;
-          guard.y = target.y;
-          guard.wpIndex += guard.wpDir;
-          if (guard.wpIndex >= guard.waypoints.length || guard.wpIndex < 0) {
-            guard.wpDir *= -1;
-            guard.wpIndex += guard.wpDir * 2;
-          }
-        } else {
-          guard.x += (dx / dist) * stepLen;
-          guard.y += (dy / dist) * stepLen;
-          guard.angle = Math.atan2(dy, dx);
-        }
-      }
-    }
-    if (ambient) return events;
-    if (state.status !== 'playing') return events;
-
-    // --- Thief movement ---
-    player.sneak = !!input.sneak;
-    const speed = player.sneak ? PLAYER.sneakSpeed : PLAYER.walkSpeed;
-    const mx = input.mx || 0;
-    const my = input.my || 0;
-    const len = Math.hypot(mx, my);
-    player.moving = len > 0.01;
-    if (player.moving) {
-      player.angle = Math.atan2(my, mx);
-      moveCircle(player, (mx / len) * speed * dt, (my / len) * speed * dt);
-    }
-
-    // --- Interact: loot, diamond, camera panel ---
-    if (input.interact) {
-      let best = null;
-      let bestDist = Infinity;
-      let bestKind = '';
-      for (const item of state.loot) {
-        if (item.taken) continue;
-        const d = Math.hypot(item.x - player.x, item.y - player.y);
-        if (d < 40 && d < bestDist) {
-          best = item;
-          bestDist = d;
-          bestKind = 'loot';
-        }
-      }
-      if (!state.diamond.taken) {
-        const d = Math.hypot(state.diamond.x - player.x, state.diamond.y - player.y);
-        if (d < 50 && d < bestDist) {
-          best = state.diamond;
-          bestDist = d;
-          bestKind = 'diamond';
-        }
-      }
-      for (const panel of state.panels) {
-        const camera = state.cameras[panel.cameraIndex];
-        if (!camera || camera.disabled > 0) continue;
-        const d = Math.hypot(panel.x - player.x, panel.y - player.y);
-        if (d < 52 && d < bestDist) {
-          best = panel;
-          bestDist = d;
-          bestKind = 'panel';
-        }
-      }
-      if (bestKind === 'loot') {
-        best.taken = true;
-        state.lootValue += best.value;
-        state.lootTaken += 1;
-        events |= EVENT_PICKUP;
-      } else if (bestKind === 'diamond') {
-        best.taken = true;
-        state.lootValue += 0;
-        events |= EVENT_DIAMOND;
-      } else if (bestKind === 'panel') {
-        const camera = state.cameras[best.cameraIndex];
-        camera.disabled = CAMERA.disableSeconds;
-        events |= EVENT_PANEL;
-      }
-    }
-
-    // --- Who sees the thief? ---
-    let seenByCamera = false;
-    let seenByGuard = false;
-    let guardAlert = false;
-    for (const camera of state.cameras) {
-      if (camera.disabled > 0) continue;
-      if (coneSees(camera.x, camera.y, camera.angle, camera.range, CAMERA.halfAngle, player.x, player.y)) {
-        seenByCamera = true;
-        break;
-      }
-    }
-    for (const guard of state.guards) {
-      const sees = coneSees(guard.x, guard.y, guard.angle, GUARD.visionRange, GUARD.visionHalfAngle, player.x, player.y);
-      if (sees) {
-        seenByGuard = true;
-        guard.lastSeen = { x: player.x, y: player.y };
-        const dist = Math.hypot(player.x - guard.x, player.y - guard.y);
-        const proximity = 1.5 - dist / GUARD.visionRange;
-        const rate = GUARD.suspicionRise * Math.max(0.35, proximity) * (player.sneak ? 0.45 : 1);
-        const before = guard.suspicion;
-        guard.suspicion = Math.min(1, guard.suspicion + rate * dt);
-        if (before < 0.35 && guard.suspicion >= 0.35) events |= EVENT_SUSPICIOUS;
-        guard.angle = Math.atan2(player.y - guard.y, player.x - guard.x);
-        if (guard.suspicion >= 1) {
-          guard.state = 'alert';
-          guardAlert = true;
-          guard.loseTimer = 0;
-        } else if (guard.suspicion >= 0.35) {
-          guard.state = 'suspicious';
-        }
-      } else {
-        guard.suspicion = Math.max(0, guard.suspicion - GUARD.suspicionFall * dt);
-        if (guard.state === 'suspicious') {
-          if (guard.suspicion < 0.35) {
-            // Nothing there after all: back to the patrol, from the nearest waypoint.
-            guard.state = 'patrol';
-            let nearest = 0;
-            let nearestDist = Infinity;
-            guard.waypoints.forEach((wp, i) => {
-              const d = Math.hypot(wp.x - guard.x, wp.y - guard.y);
-              if (d < nearestDist) {
-                nearestDist = d;
-                nearest = i;
-              }
-            });
-            guard.wpIndex = nearest;
-            guard.wpDir = nearest === guard.waypoints.length - 1 ? -1 : 1;
-          } else {
-            // Walk over to the spot and look: standing still and staring at a
-            // moving thief is neither fair nor readable.
-            const dx = guard.lastSeen.x - guard.x;
-            const dy = guard.lastSeen.y - guard.y;
-            const dist = Math.hypot(dx, dy);
-            if (dist > 14) {
-              guard.angle = Math.atan2(dy, dx);
-              moveCircle(guard, (dx / dist) * GUARD.patrolSpeed * dt, (dy / dist) * GUARD.patrolSpeed * dt);
-            }
-          }
-        }
-        if (guard.state === 'alert') {
-          guard.loseTimer += dt;
-          if (guard.loseTimer >= GUARD.giveUpSeconds) {
-            guard.state = 'patrol';
-            guard.suspicion = 0.3;
-            guard.loseTimer = 0;
-          }
-        }
-      }
-    }
-
-    // Alert guards chase the thief; a chasing guard that touches the thief busts the run.
-    for (const guard of state.guards) {
-      if (guard.state !== 'alert') continue;
-      const dx = player.x - guard.x;
-      const dy = player.y - guard.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist > 1) {
-        guard.angle = Math.atan2(dy, dx);
-        // Axis-separated movement, same as the thief: slides along walls instead of sticking.
-        moveCircle(guard, (dx / dist) * GUARD.chaseSpeed * dt, (dy / dist) * GUARD.chaseSpeed * dt);
-      }
-      if (Math.hypot(player.x - guard.x, player.y - guard.y) < GUARD.catchDistance) {
-        return events | bust('caught');
-      }
-    }
-
-    const seen = seenByCamera || seenByGuard;
-    if (seen) {
-      state.seenTime += dt;
-      if (!state.everSeen) {
-        state.everSeen = true;
-        events |= EVENT_SEEN;
-      }
-    }
-
-    // --- Alarm meter ---
-    if (!state.tripped) {
-      if (seenByCamera) state.alarm += (player.sneak ? ALARM.cameraSneak : ALARM.cameraStand) * dt;
-      if (guardAlert) state.alarm += ALARM.guardAlert * dt;
-      else if (seenByGuard) {
-        const suspicious = state.guards.some((g) => g.state === 'suspicious');
-        if (suspicious) state.alarm += ALARM.guardSuspicious * dt;
-      }
-      if (!seen) state.alarm = Math.max(0, state.alarm - ALARM.decay * dt);
-      if (state.alarm >= ALARM.max) {
-        state.alarm = ALARM.max;
-        state.tripped = true;
-        state.tripTimer = ALARM.tripSeconds;
-        state.hiddenTimer = 0;
-        for (const guard of state.guards) {
-          guard.state = 'alert';
-          guard.suspicion = 1;
-          guard.loseTimer = 0;
-        }
-        events |= EVENT_ALARM_TRIP;
-      }
-    } else {
-      // Tripped: hide unseen for 2 seconds to disarm, or the countdown ends the run.
-      if (seen) state.hiddenTimer = 0;
-      else state.hiddenTimer += dt;
-      if (state.hiddenTimer >= ALARM.hideToDisarm) {
-        state.tripped = false;
-        state.alarm = ALARM.disarmLevel;
-        for (const guard of state.guards) {
-          guard.state = 'patrol';
-          guard.suspicion = 0.3;
-          guard.loseTimer = 0;
-        }
-        events |= EVENT_DISARM;
-      } else {
-        state.tripTimer -= dt;
-        if (state.tripTimer <= 0) return events | bust('alarm');
-      }
-    }
-
-    // --- Lasers: crossing a beam trips the alarm instantly. ---
-    if (!state.tripped) {
-      for (const laser of state.lasers) {
-        if (distToSegment(player.x, player.y, laser.x1, laser.y1, laser.x2, laser.y2) < 11) {
-          state.alarm = ALARM.max;
-          state.tripped = true;
-          state.tripTimer = ALARM.tripSeconds;
-          state.hiddenTimer = 0;
-          for (const guard of state.guards) {
-            guard.state = 'alert';
-            guard.suspicion = 1;
-            guard.loseTimer = 0;
-          }
-          events |= EVENT_LASER | EVENT_ALARM_TRIP;
-          break;
-        }
-      }
-    }
-
-    // --- Win: the diamond in hand, back at the getaway van. ---
-    if (state.diamond.taken) {
-      const vanTileX = Math.floor(state.van.x / TILE);
-      const vanTileY = Math.floor(state.van.y / TILE);
-      const px = Math.floor(player.x / TILE);
-      const py = Math.floor(player.y / TILE);
-      if (px === vanTileX && py === vanTileY) {
-        state.status = 'cleared';
-        finishScore();
-        return events | EVENT_CLEARED;
-      }
-    }
-
-    return events;
-  }
-
-  loadLevel(0);
   return {
     state,
-    step,
     reset,
     nextLevel,
-    isWallTile,
-    isWallPx,
-    hasLineOfSight,
-    conePolygon,
-    coneSees,
+    step,
+    findPath: (sx, sy, tx, ty) => findPath(LEVELS[state.levelIndex], sx, sy, tx, ty),
+    isWallTile: (tx, ty) => isWallTile(LEVELS[state.levelIndex], tx, ty),
+    coneSees: (ox, oy, angle, range, halfAngle, tx, ty) =>
+      coneSees(LEVELS[state.levelIndex], ox, oy, angle, range, halfAngle, tx, ty),
+    hasLineOfSight: (x0, y0, x1, y1) => hasLineOfSight(LEVELS[state.levelIndex], x0, y0, x1, y1),
     tileCenter,
+    level: () => LEVELS[state.levelIndex],
   };
 }
+
+export { createWorld };

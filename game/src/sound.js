@@ -1,84 +1,89 @@
-// Generated sound only: every effect is a short WebAudio oscillator burst, no files,
-// no network. The context is created lazily on the first user gesture (browsers block
-// audio before one) and every call is guarded, so a headless run without audio stays silent.
+// Generated sound only: every effect is a short WebAudio oscillator phrase,
+// no audio files. The context is created on the first user gesture (or the
+// first call that has one), and M toggles mute. Nothing here throws when
+// audio is unavailable.
 
-export function createSound() {
-  let context = null;
+function createSound() {
+  let ctx = null;
   let muted = false;
 
-  function ensure() {
-    if (context) return context;
-    try {
-      const Ctor = window.AudioContext || window.webkitAudioContext;
-      if (!Ctor) return null;
-      context = new Ctor();
-    } catch {
-      return null;
+  function context() {
+    if (!ctx) {
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        ctx = new AC();
+      } catch {
+        return null;
+      }
     }
-    return context;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    return ctx;
   }
 
-  function tone(freq, dur, type, gain, slideTo) {
+  function tone(freq, dur, type, gain, when = 0, slideTo = 0) {
     if (muted) return;
-    const ctx = ensure();
-    if (!ctx) return;
+    const ac = context();
+    if (!ac) return;
     try {
-      if (ctx.state === 'suspended') void ctx.resume();
-      const osc = ctx.createOscillator();
-      const amp = ctx.createGain();
+      const t0 = ac.currentTime + when;
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
       osc.type = type;
-      osc.frequency.setValueAtTime(freq, ctx.currentTime);
-      if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, ctx.currentTime + dur);
-      amp.gain.setValueAtTime(gain, ctx.currentTime);
-      amp.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
-      osc.connect(amp).connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + dur);
+      osc.frequency.setValueAtTime(freq, t0);
+      if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(1, slideTo), t0 + dur);
+      g.gain.setValueAtTime(gain, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(g);
+      g.connect(ac.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.02);
     } catch {
-      // Audio is decoration: never let it break the game.
+      // Audio is a garnish: a failure here must never break the game.
     }
   }
 
   return {
-    unlock() {
-      ensure();
+    get muted() {
+      return muted;
     },
     toggleMute() {
       muted = !muted;
       return muted;
     },
-    isMuted() {
-      return muted;
-    },
+    /** A soft blip when loot or the diamond is grabbed. */
     pickup() {
       tone(880, 0.09, 'sine', 0.12);
-      setTimeout(() => tone(1320, 0.12, 'sine', 0.1), 60);
+      tone(1320, 0.12, 'sine', 0.1, 0.07);
     },
-    diamond() {
-      [523, 659, 784, 1046].forEach((freq, i) => setTimeout(() => tone(freq, 0.16, 'triangle', 0.12), i * 70));
-    },
+    /** A low beep when a camera panel is cut. */
     panel() {
-      tone(1200, 0.07, 'square', 0.06);
-      setTimeout(() => tone(1600, 0.09, 'square', 0.06), 80);
+      tone(520, 0.08, 'square', 0.06);
+      tone(390, 0.1, 'square', 0.06, 0.08);
     },
-    suspicious() {
-      tone(440, 0.12, 'sine', 0.1, 620);
+    /** A short tick when a guard grows suspicious. */
+    tick() {
+      tone(660, 0.06, 'triangle', 0.09);
     },
+    /** The alarm sting when the meter trips. */
     alarm() {
-      tone(220, 0.5, 'sawtooth', 0.12, 110);
-      tone(330, 0.5, 'sawtooth', 0.08, 165);
+      tone(220, 0.35, 'sawtooth', 0.08, 0, 440);
+      tone(220, 0.35, 'sawtooth', 0.08, 0.35, 440);
     },
-    laser() {
-      tone(1800, 0.2, 'sawtooth', 0.1, 300);
+    /** A rising arpeggio on a clean getaway. */
+    success() {
+      [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.18, 'sine', 0.12, i * 0.09));
     },
+    /** A low thud when the heist ends in handcuffs. */
     busted() {
-      tone(160, 0.4, 'sawtooth', 0.16, 55);
+      tone(160, 0.4, 'sawtooth', 0.14, 0, 55);
+      tone(90, 0.5, 'sine', 0.16, 0.05, 40);
     },
-    clear() {
-      [392, 523, 659, 784].forEach((freq, i) => setTimeout(() => tone(freq, 0.2, 'triangle', 0.12), i * 90));
-    },
+    /** A click for menus and cards. */
     click() {
       tone(700, 0.05, 'sine', 0.08);
     },
   };
 }
+
+export { createSound };

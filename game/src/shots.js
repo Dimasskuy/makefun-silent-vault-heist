@@ -1,111 +1,120 @@
-// The screenshot scenes behind ?shot=start|play|vault|busted. Each one plays the real
-// rules forward from a fresh world for a fixed number of steps, steered by a small
-// autopilot (breadth-first path on the tile grid, then walk it), so the frame is what a
-// short game really looks like and the same seed always gives the same frame.
+// The screenshot scenes behind ?shot=start|play|vault|busted. Each one plays
+// the real rules forward from a fresh world, steered by a small autopilot
+// (a breadth-first path, crossed only when no guard's cone covers the next
+// tile), so the frame is what a short game really looks like and the same
+// seed always gives the same frame.
 import { STEP, TILE } from './config.js';
 import { SCREEN_BUSTED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 
 const START_SECONDS = 5;
-const LIMIT_SECONDS = 40;
+const MAX_SECONDS = 90;
 
-/** Breadth-first path of tile centres from the thief to (tx, ty); [] when unreachable. */
-function findPath(world, tx, ty) {
-  const state = world.state;
-  const sx = Math.floor(state.player.x / TILE);
-  const sy = Math.floor(state.player.y / TILE);
-  const key = (x, y) => `${x},${y}`;
-  const prev = new Map([[key(sx, sy), null]]);
-  const queue = [[sx, sy]];
-  while (queue.length) {
-    const [x, y] = queue.shift();
-    if (x === tx && y === ty) break;
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (world.isWallTile(nx, ny) || prev.has(key(nx, ny))) continue;
-      prev.set(key(nx, ny), [x, y]);
-      queue.push([nx, ny]);
+/** True when any guard's cone currently covers the given point. Cameras do
+ * not count: standing in a camera cone only raises the alarm, which is what
+ * the hero shot wants. */
+function watchedByGuard(world, x, y) {
+  const s = world.state;
+  for (const g of s.guards) {
+    if (world.coneSees(g.x, g.y, g.angle, 230, 0.55, x, y)) return true;
+  }
+  return false;
+}
+
+/** Step the world toward `target` (a tile centre) until close, waiting out
+ * a guard's cone when the next tile is watched and this spot is safe. */
+function walkTo(world, target, timeoutSeconds) {
+  const s = world.state;
+  let waited = 0;
+  let steps = 0;
+  const limit = Math.ceil(timeoutSeconds / STEP);
+  while (steps < limit) {
+    const dx = target.x - s.player.x;
+    const dy = target.y - s.player.y;
+    if (Math.hypot(dx, dy) < 7) return true;
+    const nextWatched = watchedByGuard(world, target.x, target.y);
+    const hereWatched = watchedByGuard(world, s.player.x, s.player.y);
+    if (nextWatched && !hereWatched && waited < 6) {
+      world.step(STEP, { mx: 0, my: 0, sneak: false, interact: false }, false);
+      waited += STEP;
+    } else {
+      const len = Math.hypot(dx, dy) || 1;
+      world.step(STEP, { mx: dx / len, my: dy / len, sneak: false, interact: false }, false);
+      waited = 0;
     }
+    if (s.status !== 'playing') return false;
+    steps += 1;
   }
-  if (!prev.has(key(tx, ty))) return [];
-  const path = [];
-  let cur = [tx, ty];
-  while (cur) {
-    path.unshift(cur);
-    cur = prev.get(key(cur[0], cur[1]));
-  }
-  return path;
+  return false;
 }
 
-/** One step of the autopilot: steer toward the next path tile, or stand still. */
-function autopilotStep(world, path, index, sneak) {
-  const state = world.state;
-  while (index < path.length) {
-    const [tx, ty] = path[index];
-    const cx = tx * TILE + TILE / 2;
-    const cy = ty * TILE + TILE / 2;
-    if (Math.hypot(cx - state.player.x, cy - state.player.y) < 8) {
-      index += 1;
-      continue;
-    }
-    const dx = cx - state.player.x;
-    const dy = cy - state.player.y;
-    const len = Math.hypot(dx, dy);
-    return { input: { mx: dx / len, my: dy / len, sneak, interact: false }, index };
+function followPath(world, path, timeoutSeconds) {
+  for (const point of path) {
+    if (!walkTo(world, point, timeoutSeconds)) return false;
   }
-  return { input: { mx: 0, my: 0, sneak, interact: false }, index };
+  return true;
 }
 
-function walkTo(world, tx, ty, seconds, sneak) {
-  const path = findPath(world, tx, ty);
-  let index = 1;
-  const steps = Math.floor(seconds / STEP);
+function stand(world, seconds) {
+  const steps = Math.ceil(seconds / STEP);
   for (let i = 0; i < steps; i += 1) {
-    if (world.state.status !== 'playing') break;
-    const { input, index: next } = autopilotStep(world, path, index, sneak);
-    index = next;
-    world.step(STEP, input, false);
+    world.step(STEP, { mx: 0, my: 0, sneak: false, interact: false }, false);
+    if (world.state.status !== 'playing') return false;
   }
+  return true;
 }
 
-function standStill(world, seconds, sneak) {
-  const steps = Math.floor(seconds / STEP);
-  for (let i = 0; i < steps; i += 1) {
-    if (world.state.status !== 'playing') break;
-    world.step(STEP, { mx: 0, my: 0, sneak, interact: false }, false);
-  }
+function tileOf(world, x, y) {
+  return { x: Math.floor(x / TILE), y: Math.floor(y / TILE) };
 }
 
 /**
- * Set `world` to the named scene and return the screen to draw over it.
- * start: title over a live museum backdrop. play: the hero frame — the thief
- * mid-room, a guard cone, a camera cone, the diamond and a part-filled alarm meter.
- * vault: level 3, thief at the vault door, lasers and diamond in view.
- * busted: the thief walks into a guard's patrol and gets caught.
+ * Set `world` to the named scene and return the screen to draw over it and
+ * the best score to show. start: the title over a living museum. play: the
+ * hero — the thief mid-room, a guard cone and a camera cone in view, the
+ * diamond glowing, the alarm part-filled. vault: inside the laser vault.
+ * busted: the thief stands on a patrol line until a guard catches them.
  */
 export function stageShot(name, world) {
-  if (name === 'play') {
-    world.reset();
-    walkTo(world, 15, 9, 30, true);
-    standStill(world, 2.2, true);
-    return { screen: world.state.status === 'playing' ? SCREEN_PLAY : SCREEN_BUSTED };
+  if (name !== 'play' && name !== 'vault' && name !== 'busted') {
+    world.reset(0);
+    for (let i = 0; i < START_SECONDS / STEP; i += 1) world.step(STEP, null, true);
+    return { screen: SCREEN_TITLE, best: 0 };
   }
+
   if (name === 'vault') {
-    world.reset();
-    // Jump straight to level 3, then walk to the vault door.
-    world.nextLevel();
-    world.nextLevel();
-    walkTo(world, 25, 12, 38, true);
-    standStill(world, 1.5, true);
-    return { screen: SCREEN_PLAY };
+    world.reset(2);
+    const s = world.state;
+    const from = tileOf(world, s.player.x, s.player.y);
+    const path = world.findPath(from.x, from.y, 22, 3);
+    if (path) followPath(world, path.slice(1), MAX_SECONDS);
+    stand(world, 1.5);
+    return { screen: SCREEN_PLAY, best: 0 };
   }
+
   if (name === 'busted') {
-    world.reset();
-    walkTo(world, 15, 4, 20, false);
-    standStill(world, 25, false);
-    return { screen: world.state.status === 'busted' ? SCREEN_BUSTED : SCREEN_PLAY };
+    world.reset(0);
+    const s = world.state;
+    const from = tileOf(world, s.player.x, s.player.y);
+    const path = world.findPath(from.x, from.y, 15, 7);
+    if (path) followPath(world, path.slice(1), MAX_SECONDS);
+    // Stand on the patrol line: a guard walks into the thief.
+    for (let i = 0; i < 20 / STEP; i += 1) {
+      world.step(STEP, { mx: 0, my: 0, sneak: false, interact: false }, false);
+      if (world.state.status === 'busted') break;
+    }
+    return { screen: SCREEN_BUSTED, best: 0 };
   }
-  world.reset();
-  for (let i = 0; i < START_SECONDS / STEP; i += 1) world.step(STEP, null, true);
-  return { screen: SCREEN_TITLE };
+
+  // play: the hero frame on level 1. The thief waits in the south hall at
+  // (14,12): inside the camera's sweep (so the alarm meter fills part-way)
+  // but out of every guard's cone, so no guard turns alert mid-pose.
+  world.reset(0);
+  const s = world.state;
+  const from = tileOf(world, s.player.x, s.player.y);
+  const path = world.findPath(from.x, from.y, 14, 12);
+  if (path) followPath(world, path.slice(1), MAX_SECONDS);
+  // Stand in the camera's sweep so the alarm meter fills part-way (4 s is
+  // most of one sweep period, so the fill does not depend on the phase).
+  stand(world, 4.0);
+  return { screen: SCREEN_PLAY, best: 0 };
 }

@@ -1,7 +1,7 @@
-// Drawing only: the world's state and the current screen in, pixels out. The 1280x720
-// playfield is scaled to fit the window and centred, the margin filled with the backdrop
-// colour. Everything is drawn in code — no images, no fonts from the network.
-import { CAMERA, FIELD, FONT, GUARD, PALETTE, TILE } from './config.js';
+// All drawing lives here: the museum, the cones, the thief, the HUD and
+// every screen. It never changes the world; it only paints the state it is
+// handed. The canvas is a fixed 1280x720 logical area scaled to the window.
+import { TILE, FIELD, FONT, PALETTE, PLAYER, GUARD, CAMERA } from './config.js';
 import { LEVELS } from './levels.js';
 
 export const SCREEN_TITLE = 'title';
@@ -9,567 +9,439 @@ export const SCREEN_INTRO = 'intro';
 export const SCREEN_PLAY = 'play';
 export const SCREEN_PAUSED = 'paused';
 export const SCREEN_BUSTED = 'busted';
-export const SCREEN_CLEAR = 'clear';
+export const SCREEN_CLEARED = 'cleared';
 export const SCREEN_FINAL = 'final';
 
-const PANEL = { width: 640, top: 118, line: 32, bottom: 64 };
+const TINTS = {
+  gallery: PALETTE.floorGallery,
+  office: PALETTE.floorOffice,
+  vault: PALETTE.floorVault,
+};
 
-function cachedLabel(prefix) {
-  let value = null;
-  let text = '';
-  return function label(next) {
-    if (next !== value) {
-      value = next;
-      text = prefix + next;
-    }
-    return text;
-  };
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = Math.max(0, Math.min(255, (n >> 16) + amt));
+  const g = Math.max(0, Math.min(255, ((n >> 8) & 0xff) + amt));
+  const b = Math.max(0, Math.min(255, (n & 0xff) + amt));
+  return `rgb(${r},${g},${b})`;
 }
 
-function money(value) {
-  return '$' + value.toLocaleString('en-US');
+function drawCone(ctx, x, y, angle, range, halfAngle, fill) {
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.arc(x, y, range, angle - halfAngle, angle + halfAngle);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
 }
 
-export function createRenderer(canvas, world) {
-  const context = canvas.getContext('2d');
-  const view = { scale: 1, x: 0, y: 0 };
-  const lootLabel = cachedLabel('LOOT ');
-  const timeLabel = cachedLabel('');
-  const bestLabel = cachedLabel('Best ');
-  const fonts = new Map();
-  let vignette = null;
+function createRenderer(canvas) {
+  const ctx = canvas.getContext('2d');
 
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    const width = Math.round(window.innerWidth * ratio);
-    const height = Math.round(window.innerHeight * ratio);
-    canvas.width = width;
-    canvas.height = height;
-    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
-    view.x = (width - FIELD.width * view.scale) / 2;
-    view.y = (height - FIELD.height * view.scale) / 2;
-    vignette = null;
+  function fit() {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = canvas.clientWidth || FIELD.width;
+    const h = canvas.clientHeight || FIELD.height;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(canvas.width / FIELD.width, 0, 0, canvas.height / FIELD.height, 0, 0);
   }
-
-  function text(value, x, y, size, color, align, baseline) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align || 'left';
-    context.textBaseline = baseline || 'alphabetic';
-    context.fillText(value, x, y);
-  }
-
-  function floorColors(tint) {
-    if (tint === 'office') return ['#2b2823', '#26231f'];
-    if (tint === 'vault') return ['#1e2836', '#1a2330'];
-    return [PALETTE.floorA, PALETTE.floorB];
-  }
+  window.addEventListener('resize', fit);
+  fit();
 
   function drawFloor(state) {
-    const [a, b] = floorColors(state.level.floorTint);
-    for (let ty = 0; ty < state.grid.length; ty += 1) {
-      for (let tx = 0; tx < state.grid[ty].length; tx += 1) {
-        if (state.grid[ty][tx] === '#') continue;
-        context.fillStyle = (tx + ty) % 2 === 0 ? a : b;
-        context.fillRect(tx * TILE, ty * TILE, TILE, TILE);
+    const level = LEVELS[state.levelIndex];
+    const base = TINTS[level.tint] || PALETTE.floorA;
+    for (let y = 0; y < level.map.length; y += 1) {
+      for (let x = 0; x < level.map[y].length; x += 1) {
+        if (level.map[y][x] === '#') continue;
+        ctx.fillStyle = (x + y) % 2 === 0 ? base : shade(base, -8);
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
       }
-    }
-    // A worn red carpet leads to the diamond pedestal in the vault wing.
-    if (state.level.floorTint === 'vault') {
-      context.fillStyle = PALETTE.carpet;
-      context.fillRect(22 * TILE, 1 * TILE, 9 * TILE, 3 * TILE);
     }
   }
 
   function drawWalls(state) {
-    for (let ty = 0; ty < state.grid.length; ty += 1) {
-      for (let tx = 0; tx < state.grid[ty].length; tx += 1) {
-        if (state.grid[ty][tx] !== '#') continue;
-        const x = tx * TILE;
-        const y = ty * TILE;
-        context.fillStyle = PALETTE.wall;
-        context.fillRect(x, y, TILE, TILE);
-        context.fillStyle = PALETTE.wallSide;
-        context.fillRect(x, y + TILE - 5, TILE, 5);
-        // Top-face highlight where a floor tile sits below the wall: reads as depth.
-        if (ty + 1 < state.grid.length && state.grid[ty + 1][tx] !== '#') {
-          context.fillStyle = PALETTE.wallTop;
-          context.fillRect(x, y + TILE - 9, TILE, 4);
+    const level = LEVELS[state.levelIndex];
+    for (let y = 0; y < level.map.length; y += 1) {
+      for (let x = 0; x < level.map[y].length; x += 1) {
+        if (level.map[y][x] !== '#') continue;
+        ctx.fillStyle = PALETTE.wall;
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        // A top-face highlight where the tile below is floor: depth.
+        if (y + 1 < level.map.length && level.map[y + 1][x] !== '#') {
+          ctx.fillStyle = PALETTE.wallTop;
+          ctx.fillRect(x * TILE, y * TILE + TILE - 6, TILE, 6);
         }
+        ctx.fillStyle = PALETTE.wallEdge;
+        ctx.fillRect(x * TILE, y * TILE, TILE, 2);
       }
     }
   }
 
   function drawVan(state) {
-    const { x, y } = state.van;
-    const pulse = state.diamond.taken ? 0.55 + 0.45 * Math.sin(state.elapsed * 5) : 0;
-    context.save();
-    context.translate(x, y);
-    // Wheels.
-    context.fillStyle = '#101216';
-    context.beginPath();
-    context.arc(-13, 12, 6, 0, Math.PI * 2);
-    context.arc(13, 12, 6, 0, Math.PI * 2);
-    context.fill();
-    // Body.
-    context.fillStyle = state.diamond.taken ? PALETTE.van : PALETTE.vanDark;
-    context.beginPath();
-    context.roundRect(-19, -14, 38, 26, 5);
-    context.fill();
-    context.fillStyle = 'rgba(238, 241, 245, 0.85)';
-    context.fillRect(-19, -2, 38, 4);
-    context.fillStyle = '#bcd6ff';
-    context.fillRect(11, -11, 7, 9);
-    context.restore();
-    if (state.diamond.taken) {
-      context.fillStyle = `rgba(79, 195, 247, ${0.5 + pulse * 0.5})`;
-      context.beginPath();
-      context.moveTo(x, y - 34 - pulse * 4);
-      context.lineTo(x - 7, y - 22);
-      context.lineTo(x + 7, y - 22);
-      context.closePath();
-      context.fill();
-      text('GO!', x, y - 40, 15, '#4fc3f7', 'center');
-    }
-  }
-
-  function drawDiamond(state) {
-    if (state.diamond.taken) return;
-    const { x, y } = state.diamond;
-    const t = state.elapsed;
-    const glow = 0.5 + 0.3 * Math.sin(t * 3);
-    // Pedestal.
-    context.fillStyle = '#4a5266';
-    context.fillRect(x - 14, y - 2, 28, 16);
-    context.fillStyle = '#6a7590';
-    context.fillRect(x - 14, y - 2, 28, 4);
-    // Glow + gem.
-    const grad = context.createRadialGradient(x, y - 12, 2, x, y - 12, 34);
-    grad.addColorStop(0, `rgba(127, 231, 255, ${0.55 * glow})`);
-    grad.addColorStop(1, 'rgba(127, 231, 255, 0)');
-    context.fillStyle = grad;
-    context.beginPath();
-    context.arc(x, y - 12, 34, 0, Math.PI * 2);
-    context.fill();
-    context.save();
-    context.translate(x, y - 12);
-    context.rotate(Math.PI / 4);
-    context.fillStyle = PALETTE.diamond;
-    context.fillRect(-8, -8, 16, 16);
-    context.fillStyle = 'rgba(255, 255, 255, 0.85)';
-    context.fillRect(-8, -8, 16, 5);
-    context.restore();
-    // Sparkles.
-    for (let i = 0; i < 3; i += 1) {
-      const a = t * 1.4 + (i * Math.PI * 2) / 3;
-      const sx = x + Math.cos(a) * 20;
-      const sy = y - 12 + Math.sin(a) * 14;
-      context.fillStyle = `rgba(255, 255, 255, ${0.4 + 0.4 * Math.sin(t * 4 + i)})`;
-      context.fillRect(sx - 1, sy - 4, 2, 8);
-      context.fillRect(sx - 4, sy - 1, 8, 2);
-    }
-    text('AURORA DIAMOND', x, y + 34, 12, PALETTE.diamond, 'center');
+    const v = state.van;
+    ctx.save();
+    ctx.translate(v.x, v.y);
+    ctx.fillStyle = PALETTE.van;
+    ctx.beginPath();
+    ctx.roundRect(-26, -16, 52, 32, 6);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(-26, -16, 52, 8);
+    ctx.fillStyle = '#101018';
+    ctx.beginPath();
+    ctx.arc(-16, 16, 5, 0, Math.PI * 2);
+    ctx.arc(16, 16, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = PALETTE.text;
+    ctx.font = `bold 11px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.fillText('VAN', 0, 4);
+    ctx.restore();
   }
 
   function drawLoot(state) {
-    state.loot.forEach((item, index) => {
+    const colors = [PALETTE.lootGold, PALETTE.lootPink, PALETTE.lootOrange];
+    state.loot.forEach((item, i) => {
       if (item.taken) return;
-      const bob = Math.sin(state.elapsed * 2 + index) * 2;
-      const kind = index % 3;
-      context.save();
-      context.translate(item.x, item.y + bob);
-      if (kind === 0) {
-        // Gold bars.
-        context.fillStyle = PALETTE.lootGold;
-        context.fillRect(-11, -4, 22, 8);
-        context.fillStyle = '#c9a227';
-        context.fillRect(-11, 0, 22, 4);
-      } else if (kind === 1) {
-        // Vase.
-        context.fillStyle = PALETTE.lootArt;
-        context.beginPath();
-        context.ellipse(0, 0, 8, 11, 0, 0, Math.PI * 2);
-        context.fill();
-        context.fillStyle = '#8a5aa0';
-        context.fillRect(-4, -14, 8, 5);
-      } else {
-        // Framed painting.
-        context.fillStyle = '#7a5a2e';
-        context.fillRect(-12, -10, 24, 20);
-        context.fillStyle = '#3f7d8c';
-        context.fillRect(-9, -7, 18, 14);
-        context.fillStyle = '#e8b23a';
-        context.beginPath();
-        context.arc(0, 0, 4, 0, Math.PI * 2);
-        context.fill();
-      }
-      context.restore();
-      text(money(item.value), item.x, item.y + 26, 11, PALETTE.lootGold, 'center');
+      const bob = Math.sin(state.time * 3 + i) * 2;
+      ctx.save();
+      ctx.translate(item.x, item.y + bob);
+      ctx.fillStyle = colors[i % colors.length];
+      ctx.beginPath();
+      ctx.moveTo(0, -9);
+      ctx.lineTo(7, 0);
+      ctx.lineTo(0, 9);
+      ctx.lineTo(-7, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.beginPath();
+      ctx.arc(-2, -3, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     });
+  }
+
+  function drawDiamond(state) {
+    const d = state.diamond;
+    if (d.taken) return;
+    const pulse = 1 + Math.sin(state.time * 4) * 0.12;
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.scale(pulse, pulse);
+    const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, 34);
+    glow.addColorStop(0, 'rgba(127,231,255,0.55)');
+    glow.addColorStop(1, 'rgba(127,231,255,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, 34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = PALETTE.diamond;
+    ctx.beginPath();
+    ctx.moveTo(0, -13);
+    ctx.lineTo(10, 0);
+    ctx.lineTo(0, 13);
+    ctx.lineTo(-10, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(0, -13);
+    ctx.lineTo(10, 0);
+    ctx.lineTo(0, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = PALETTE.diamond;
+    ctx.font = `bold 11px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.fillText('AURORA DIAMOND', d.x, d.y - 24);
   }
 
   function drawPanels(state) {
     for (const panel of state.panels) {
-      const camera = state.cameras[panel.cameraIndex];
-      const off = camera && camera.disabled > 0;
-      context.fillStyle = off ? '#3a4a3a' : '#5a3a3a';
-      context.fillRect(panel.x - 10, panel.y - 10, 20, 20);
-      context.fillStyle = off ? '#7dff9a' : (Math.sin(state.elapsed * 4) > 0 ? '#ff5a4a' : '#a33');
-      context.beginPath();
-      context.arc(panel.x, panel.y, 4, 0, Math.PI * 2);
-      context.fill();
-      text('PANEL', panel.x, panel.y + 26, 10, PALETTE.muted, 'center');
+      const cam = state.cameras[panel.camera];
+      const off = cam && cam.disabled > 0;
+      ctx.save();
+      ctx.translate(panel.x, panel.y);
+      ctx.fillStyle = off ? '#3f7a4a' : PALETTE.panel;
+      ctx.beginPath();
+      ctx.roundRect(-9, -9, 18, 18, 3);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold 10px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('E', 0, 4);
+      ctx.restore();
+    }
+  }
+
+  function drawCameras(state) {
+    for (const cam of state.cameras) {
+      const off = cam.disabled > 0;
+      if (!off) drawCone(ctx, cam.x, cam.y, cam.angle, CAMERA.range, CAMERA.halfAngle, PALETTE.coneCamera);
+      ctx.save();
+      ctx.translate(cam.x, cam.y);
+      ctx.rotate(cam.angle);
+      ctx.fillStyle = off ? '#3a3a44' : PALETTE.cameraBody;
+      ctx.beginPath();
+      ctx.arc(0, 0, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = off ? '#55555f' : '#9fd8ff';
+      ctx.beginPath();
+      ctx.arc(6, 0, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      if (off) {
+        ctx.fillStyle = PALETTE.muted;
+        ctx.font = `bold 10px ${FONT}`;
+        ctx.textAlign = 'center';
+        ctx.fillText(`OFF ${Math.ceil(cam.disabled)}s`, cam.x, cam.y - 16);
+      }
     }
   }
 
   function drawLasers(state) {
-    for (const laser of state.lasers) {
-      const dx = laser.x2 - laser.x1;
-      const dy = laser.y2 - laser.y1;
-      const len = Math.hypot(dx, dy);
-      const nx = -dy / len;
-      const ny = dx / len;
-      context.strokeStyle = 'rgba(255, 59, 92, 0.25)';
-      context.lineWidth = 7;
-      context.beginPath();
-      context.moveTo(laser.x1, laser.y1);
-      context.lineTo(laser.x2, laser.y2);
-      context.stroke();
-      context.strokeStyle = PALETTE.laser;
-      context.lineWidth = 2;
-      context.setLineDash([10, 8]);
-      context.lineDashOffset = -state.elapsed * 30;
-      context.beginPath();
-      context.moveTo(laser.x1, laser.y1);
-      context.lineTo(laser.x2, laser.y2);
-      context.stroke();
-      context.setLineDash([]);
-      // Emitters.
-      for (const [ex, ey] of [[laser.x1, laser.y1], [laser.x2, laser.y2]]) {
-        context.fillStyle = '#ff8ba0';
-        context.beginPath();
-        context.arc(ex, ey, 4, 0, Math.PI * 2);
-        context.fill();
+    for (const lz of state.lasers) {
+      ctx.save();
+      ctx.strokeStyle = PALETTE.laser;
+      ctx.lineWidth = 3;
+      ctx.shadowColor = PALETTE.laser;
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.moveTo(lz.x1, lz.y1);
+      ctx.lineTo(lz.x2, lz.y2);
+      ctx.stroke();
+      ctx.restore();
+      for (const [x, y] of [[lz.x1, lz.y1], [lz.x2, lz.y2]]) {
+        ctx.fillStyle = '#ff8a9a';
+        ctx.fillRect(x - 4, y - 4, 8, 8);
       }
-      void nx;
-      void ny;
-    }
-  }
-
-  function drawCone(points, color) {
-    context.fillStyle = color;
-    context.beginPath();
-    context.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i += 1) context.lineTo(points[i].x, points[i].y);
-    context.closePath();
-    context.fill();
-  }
-
-  function drawCameras(state) {
-    for (const camera of state.cameras) {
-      const off = camera.disabled > 0;
-      if (!off) {
-        const points = world.conePolygon(camera.x, camera.y, camera.angle, camera.range, CAMERA.halfAngle);
-        drawCone(points, PALETTE.coneCamera);
-      }
-      context.save();
-      context.translate(camera.x, camera.y);
-      context.rotate(camera.angle);
-      context.fillStyle = off ? '#4a5058' : PALETTE.cameraBody;
-      context.beginPath();
-      context.roundRect(-4, -7, 22, 14, 4);
-      context.fill();
-      context.fillStyle = off ? '#333' : '#20242e';
-      context.beginPath();
-      context.arc(18, 0, 5, 0, Math.PI * 2);
-      context.fill();
-      context.fillStyle = off ? '#555' : '#7fe7ff';
-      context.beginPath();
-      context.arc(19, 0, 2.5, 0, Math.PI * 2);
-      context.fill();
-      context.restore();
-      // Mount.
-      context.fillStyle = '#3a3f4a';
-      context.fillRect(camera.x - 3, camera.y - 3, 6, 6);
-      if (off) text(`OFF ${Math.ceil(camera.disabled)}s`, camera.x, camera.y - 20, 12, '#7dff9a', 'center');
     }
   }
 
   function drawGuards(state) {
     for (const guard of state.guards) {
-      const color = guard.state === 'alert' ? PALETTE.coneAlert : guard.state === 'suspicious' ? PALETTE.coneSuspicious : PALETTE.conePatrol;
-      const points = world.conePolygon(guard.x, guard.y, guard.angle, 232, 0.55);
-      drawCone(points, color);
+      const fill = guard.state === 'alert'
+        ? PALETTE.coneGuardAlert
+        : guard.state === 'suspicious'
+          ? PALETTE.coneGuardSuspicious
+          : PALETTE.coneGuard;
+      drawCone(ctx, guard.x, guard.y, guard.angle, GUARD.visionRange, GUARD.visionHalfAngle, fill);
     }
     for (const guard of state.guards) {
-      context.save();
-      context.translate(guard.x, guard.y);
-      // Soft shadow.
-      context.fillStyle = 'rgba(0, 0, 0, 0.35)';
-      context.beginPath();
-      context.ellipse(2, 10, 13, 6, 0, 0, Math.PI * 2);
-      context.fill();
-      // Body.
-      context.fillStyle = PALETTE.guard;
-      context.beginPath();
-      context.arc(0, 0, GUARD.radius, 0, Math.PI * 2);
-      context.fill();
-      // Cap.
-      context.fillStyle = PALETTE.guardCap;
-      context.beginPath();
-      context.arc(Math.cos(guard.angle) * 3, Math.sin(guard.angle) * 3 - 2, 8, 0, Math.PI * 2);
-      context.fill();
-      // Facing tick.
-      context.strokeStyle = '#dfe6f2';
-      context.lineWidth = 2;
-      context.beginPath();
-      context.moveTo(Math.cos(guard.angle) * 8, Math.sin(guard.angle) * 8);
-      context.lineTo(Math.cos(guard.angle) * 15, Math.sin(guard.angle) * 15);
-      context.stroke();
-      context.restore();
-      if (guard.state === 'suspicious') {
-        text('?', guard.x, guard.y - 22, 22, '#f28c3c', 'center');
-      } else if (guard.state === 'alert') {
-        text('!', guard.x, guard.y - 22, 24, '#e5534b', 'center');
+      ctx.save();
+      ctx.translate(guard.x, guard.y);
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(0, 4, 14, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = PALETTE.guard;
+      ctx.beginPath();
+      ctx.arc(0, 0, GUARD.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = PALETTE.guardCap;
+      ctx.beginPath();
+      ctx.arc(0, -2, 9, Math.PI, 0);
+      ctx.fill();
+      ctx.fillRect(-9, -3, 18, 3);
+      // A nose tick so the facing is readable at a glance.
+      ctx.strokeStyle = '#d8e2f2';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(guard.angle) * 12, Math.sin(guard.angle) * 12);
+      ctx.stroke();
+      ctx.restore();
+      if (guard.state !== 'patrol') {
+        ctx.fillStyle = guard.state === 'alert' ? PALETTE.red : PALETTE.gold;
+        ctx.font = `bold 22px ${FONT}`;
+        ctx.textAlign = 'center';
+        ctx.fillText(guard.state === 'alert' ? '!' : '?', guard.x, guard.y - 22);
       }
     }
   }
 
   function drawThief(state) {
-    const player = state.player;
-    const r = player.sneak ? 11 : 13;
-    context.save();
-    context.translate(player.x, player.y);
-    // Shadow.
-    context.fillStyle = 'rgba(0, 0, 0, 0.4)';
-    context.beginPath();
-    context.ellipse(2, 10, 12, 5, 0, 0, Math.PI * 2);
-    context.fill();
-    // Backpack grows with the haul.
-    const pack = 5 + Math.min(9, state.lootTaken * 2) + (state.diamond.taken ? 3 : 0);
-    context.fillStyle = '#3a2f22';
-    context.fillRect(-Math.cos(player.angle) * 8 - pack / 2, -Math.sin(player.angle) * 8 - pack / 2, pack, pack);
-    // Hoodie body.
-    context.fillStyle = PALETTE.thief;
-    context.beginPath();
-    context.arc(0, 0, r, 0, Math.PI * 2);
-    context.fill();
-    context.strokeStyle = PALETTE.thiefTrim;
-    context.lineWidth = 2;
-    context.beginPath();
-    context.arc(0, 0, r, player.angle - 0.9, player.angle + 0.9);
-    context.stroke();
-    // Mask + eyes, facing the move direction.
-    context.fillStyle = '#dfe6f2';
-    context.beginPath();
-    context.arc(Math.cos(player.angle) * 6, Math.sin(player.angle) * 6, 4.5, 0, Math.PI * 2);
-    context.fill();
-    context.fillStyle = '#14161c';
-    context.beginPath();
-    context.arc(Math.cos(player.angle) * 7.5 - Math.sin(player.angle) * 2, Math.sin(player.angle) * 7.5 + Math.cos(player.angle) * 2, 1.2, 0, Math.PI * 2);
-    context.arc(Math.cos(player.angle) * 7.5 + Math.sin(player.angle) * 2, Math.sin(player.angle) * 7.5 - Math.cos(player.angle) * 2, 1.2, 0, Math.PI * 2);
-    context.fill();
-    context.restore();
+    const p = state.player;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath();
+    ctx.ellipse(0, 5, 13, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Backpack grows with the loot carried.
+    const pack = 4 + Math.min(5, state.loot.filter((l) => l.taken).length + (state.diamond.taken ? 1 : 0)) * 1.6;
+    ctx.fillStyle = '#4a3a28';
+    ctx.beginPath();
+    ctx.arc(-Math.cos(p.angle) * 8, -Math.sin(p.angle) * 8, pack, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = PALETTE.thief;
+    ctx.beginPath();
+    ctx.arc(0, 0, PLAYER.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = PALETTE.thiefHood;
+    ctx.beginPath();
+    ctx.arc(Math.cos(p.angle) * 2, Math.sin(p.angle) * 2, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = PALETTE.thiefFace;
+    ctx.beginPath();
+    ctx.arc(Math.cos(p.angle) * 6, Math.sin(p.angle) * 6, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    if (p.sneak) {
+      ctx.fillStyle = PALETTE.muted;
+      ctx.font = `bold 10px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('SNEAK', p.x, p.y - 20);
+    }
   }
 
-  function nearestInteractable(state) {
-    const player = state.player;
-    let best = null;
-    let bestDist = Infinity;
-    for (const item of state.loot) {
-      if (item.taken) continue;
-      const d = Math.hypot(item.x - player.x, item.y - player.y);
-      if (d < 40 && d < bestDist) {
-        best = { label: `E — Grab loot ${money(item.value)}`, dist: d };
-        bestDist = d;
-      }
+  function drawParticles(state) {
+    for (const part of state.particles) {
+      ctx.globalAlpha = Math.max(0, part.life * 2);
+      ctx.fillStyle = part.color;
+      ctx.beginPath();
+      ctx.arc(part.x, part.y, 3, 0, Math.PI * 2);
+      ctx.fill();
     }
-    if (!state.diamond.taken) {
-      const d = Math.hypot(state.diamond.x - player.x, state.diamond.y - player.y);
-      if (d < 50 && d < bestDist) {
-        best = { label: 'E — Take the Aurora Diamond', dist: d };
-        bestDist = d;
-      }
-    }
-    for (const panel of state.panels) {
-      const camera = state.cameras[panel.cameraIndex];
-      if (!camera || camera.disabled > 0) continue;
-      const d = Math.hypot(panel.x - player.x, panel.y - player.y);
-      if (d < 52 && d < bestDist) {
-        best = { label: 'E — Disable camera (12s)', dist: d };
-        bestDist = d;
-      }
-    }
-    return best;
+    ctx.globalAlpha = 1;
   }
 
-  function alarmColor(alarm) {
-    if (alarm >= 70) return PALETTE.alarmHigh;
-    if (alarm >= 35) return PALETTE.alarmMid;
-    return PALETTE.alarmLow;
-  }
+  function drawHud(state) {
+    const level = LEVELS[state.levelIndex];
+    ctx.fillStyle = 'rgba(10,13,24,0.72)';
+    ctx.fillRect(0, 0, FIELD.width, 44);
+    ctx.fillStyle = PALETTE.text;
+    ctx.font = `bold 15px ${FONT}`;
+    ctx.textAlign = 'left';
+    ctx.fillText(`${level.name}  ·  ${Math.floor(state.elapsed)}s`, 14, 28);
+    ctx.textAlign = 'center';
+    ctx.font = `15px ${FONT}`;
+    ctx.fillText(state.diamond.taken ? 'Diamond secured — reach the VAN!' : 'Steal the AURORA DIAMOND, then reach the VAN', FIELD.width / 2, 28);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = PALETTE.gold;
+    ctx.font = `bold 15px ${FONT}`;
+    ctx.fillText(`$${state.lootValue + (state.diamond.taken ? 1000 : 0)}  ·  score ${state.score}`, FIELD.width - 14, 28);
 
-  function drawHud(state, info) {
-    // Top strip.
-    context.fillStyle = 'rgba(11, 14, 20, 0.85)';
-    context.fillRect(0, 0, FIELD.width, 52);
-    text(lootLabel(state.lootValue + (state.diamond.taken ? 1000 : 0)), 20, 33, 24, PALETTE.lootGold, 'left');
-    text(state.diamond.taken ? '◆ DIAMOND SECURED' : '◆ STEAL THE DIAMOND', 300, 33, 18, state.diamond.taken ? PALETTE.diamond : PALETTE.text, 'left');
-    text(state.level.name, FIELD.width / 2, 33, 20, PALETTE.text, 'center');
-    const mins = Math.floor(state.elapsed / 60);
-    const secs = Math.floor(state.elapsed % 60);
-    text(timeLabel(`${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`), FIELD.width - 20, 33, 22, PALETTE.text, 'right');
-
-    // Alarm meter.
-    const barX = 20;
-    const barY = 62;
-    const barW = FIELD.width - 40;
-    const barH = 18;
-    context.fillStyle = 'rgba(11, 14, 20, 0.85)';
-    context.fillRect(barX - 6, barY - 20, barW + 12, barH + 28);
-    text('ALARM', barX, barY - 4, 13, PALETTE.muted, 'left');
-    context.fillStyle = '#20242e';
-    context.fillRect(barX, barY, barW, barH);
-    context.fillStyle = alarmColor(state.alarm);
-    context.fillRect(barX, barY, (barW * state.alarm) / 100, barH);
-    context.strokeStyle = state.tripped && Math.sin(state.elapsed * 10) > 0 ? '#ff5a4a' : '#4a5058';
-    context.lineWidth = 2;
-    context.strokeRect(barX, barY, barW, barH);
+    // Alarm meter, top centre under the bar.
+    const mw = 320;
+    const mx = (FIELD.width - mw) / 2;
+    const my = 52;
+    ctx.fillStyle = 'rgba(10,13,24,0.72)';
+    ctx.fillRect(mx - 8, my - 4, mw + 16, 26);
+    ctx.fillStyle = '#2a3040';
+    ctx.fillRect(mx, my, mw, 14);
+    const frac = state.alarm / 100;
+    ctx.fillStyle = state.tripped ? (Math.floor(state.time * 6) % 2 ? PALETTE.red : '#ff8a7a') : frac > 0.6 ? PALETTE.red : PALETTE.gold;
+    ctx.fillRect(mx, my, mw * frac, 14);
+    ctx.fillStyle = PALETTE.text;
+    ctx.font = `bold 11px ${FONT}`;
+    ctx.textAlign = 'left';
+    ctx.fillText('ALARM', mx - 8, my - 8 + 0);
+    ctx.textAlign = 'right';
+    ctx.fillText(state.tripped ? `HIDE! ${Math.ceil(state.tripTimer)}s` : `${Math.round(state.alarm)}%`, mx + mw + 8, my + 11);
     if (state.tripped) {
-      text(`HIDE! ${Math.max(0, state.tripTimer).toFixed(1)}s`, barX + barW + 0, barY - 4, 13, '#ff5a4a', 'right');
-    } else if (state.alarm > 0) {
-      text(`${Math.round(state.alarm)}%`, barX + barW, barY - 4, 13, alarmColor(state.alarm), 'right');
-    }
-
-    // Objective line.
-    const objective = state.diamond.taken
-      ? 'Objective: reach the getaway van — do not get caught'
-      : 'Objective: steal the Aurora Diamond, grab loot, reach the van';
-    text(objective, 20, 112, 15, PALETTE.muted, 'left');
-    if (state.player.sneak) text('SNEAKING', FIELD.width - 20, 112, 15, '#4fc3f7', 'right');
-    if (info.muted) text('MUTED (M)', FIELD.width - 20, 136, 13, PALETTE.muted, 'right');
-
-    // Interact prompt.
-    const near = nearestInteractable(state);
-    if (near) {
-      const label = near.label;
-      context.font = `16px ${FONT}`;
-      const w = context.measureText(label).width + 28;
-      context.fillStyle = 'rgba(11, 14, 20, 0.88)';
-      context.beginPath();
-      context.roundRect((FIELD.width - w) / 2, FIELD.height - 52, w, 34, 17);
-      context.fill();
-      text(label, FIELD.width / 2, FIELD.height - 29, 16, PALETTE.lootGold, 'center');
+      ctx.fillStyle = PALETTE.red;
+      ctx.font = `bold 18px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('ALARM TRIPPED — BREAK LINE OF SIGHT!', FIELD.width / 2, 96);
     }
   }
 
-  function drawVignette() {
-    if (!vignette) {
-      vignette = context.createRadialGradient(
-        FIELD.width / 2, FIELD.height / 2, FIELD.height * 0.45,
-        FIELD.width / 2, FIELD.height / 2, FIELD.height * 0.85,
-      );
-      vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
-      vignette.addColorStop(1, 'rgba(0, 0, 0, 0.42)');
-    }
-    context.fillStyle = vignette;
-    context.fillRect(0, 0, FIELD.width, FIELD.height);
+  function dim() {
+    ctx.fillStyle = 'rgba(8,10,20,0.72)';
+    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
   }
 
-  function drawPanel(title, lines, prompt, accent) {
-    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
-    const x = (FIELD.width - PANEL.width) / 2;
-    const y = (FIELD.height - height) / 2;
-    context.fillStyle = 'rgba(11, 14, 20, 0.92)';
-    context.fillRect(x, y, PANEL.width, height);
-    context.strokeStyle = accent || PALETTE.thiefTrim;
-    context.lineWidth = 2;
-    context.strokeRect(x, y, PANEL.width, height);
-    context.textBaseline = 'alphabetic';
-    text(title, FIELD.width / 2, y + 76, 46, accent || PALETTE.text, 'center');
-    for (let index = 0; index < lines.length; index += 1) {
-      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 20, PALETTE.muted, 'center');
-    }
-    text(prompt, FIELD.width / 2, y + height - 34, 20, PALETTE.lootGold, 'center');
+  function card(title, lines, accent) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = accent || PALETTE.text;
+    ctx.font = `bold 44px ${FONT}`;
+    ctx.fillText(title, FIELD.width / 2, 250);
+    ctx.fillStyle = PALETTE.text;
+    ctx.font = `19px ${FONT}`;
+    lines.forEach((line, i) => {
+      ctx.fillText(line, FIELD.width / 2, 300 + i * 30);
+    });
   }
 
-  function drawField(state) {
+  function draw(state, screen, best) {
+    fit();
+    ctx.fillStyle = PALETTE.backdrop;
+    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
     drawFloor(state);
     drawVan(state);
-    drawDiamond(state);
     drawLoot(state);
+    drawDiamond(state);
     drawPanels(state);
     drawLasers(state);
     drawCameras(state);
     drawGuards(state);
     drawThief(state);
-    drawWalls(state);
-    drawVignette();
-  }
+    drawParticles(state);
+    if (screen === SCREEN_PLAY || screen === SCREEN_PAUSED) drawHud(state);
 
-  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
-  function draw(state, screen, info) {
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = PALETTE.backdrop;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
-    drawField(state);
     if (screen === SCREEN_TITLE) {
-      const lines = [
-        'One thief. One museum. One legendary diamond.',
-        'Dodge the guard cones, slip past the cameras,',
-        'lift the Aurora Diamond and reach the van.',
-        '',
-        'Move WASD / arrows · SHIFT sneak · E interact · R restart · M mute',
-        bestLabel(info.best),
-      ];
-      drawPanel('SILENT VAULT', lines, 'Press Enter or click to start', PALETTE.thiefTrim);
-      return;
-    }
-    drawHud(state, info);
-    if (screen === SCREEN_INTRO) {
-      const lines = [
-        state.level.sub,
-        '',
-        `Par time ${state.level.par}s · Loot on this floor: ${state.loot.length} pieces`,
-        state.level.lasers.length ? 'Lasers trip the alarm instantly — cross them only if you must.' : 'Watch the cones: amber patrol, orange suspicious, red alert.',
-      ];
-      drawPanel(state.level.name, lines, 'Press Enter to begin the heist', PALETTE.diamond);
+      dim();
+      ctx.textAlign = 'center';
+      ctx.fillStyle = PALETTE.gold;
+      ctx.font = `bold 64px ${FONT}`;
+      ctx.fillText('SILENT VAULT', FIELD.width / 2, 210);
+      ctx.fillStyle = PALETTE.text;
+      ctx.font = `20px ${FONT}`;
+      ctx.fillText('One thief. One museum. One legendary diamond.', FIELD.width / 2, 252);
+      ctx.font = `17px ${FONT}`;
+      ctx.fillStyle = PALETTE.muted;
+      ctx.fillText('WASD / arrows — move    Shift — sneak    E — grab / cut panel', FIELD.width / 2, 310);
+      ctx.fillText('R — restart level    M — mute    P — pause', FIELD.width / 2, 336);
+      ctx.fillStyle = PALETTE.text;
+      ctx.font = `bold 20px ${FONT}`;
+      ctx.fillText('Press Enter or click to start the heist', FIELD.width / 2, 400);
+      if (best > 0) {
+        ctx.fillStyle = PALETTE.gold;
+        ctx.font = `16px ${FONT}`;
+        ctx.fillText(`Best score: ${best}`, FIELD.width / 2, 436);
+      }
+    } else if (screen === SCREEN_INTRO) {
+      dim();
+      const level = LEVELS[state.levelIndex];
+      card(level.name, [level.sub, `Par time: ${level.par}s — faster means a bigger time bonus`, '', 'Press Enter to begin'], PALETTE.gold);
     } else if (screen === SCREEN_PAUSED) {
-      drawPanel('Paused', ['The guards will wait for you.'], 'Press P to resume', PALETTE.text);
+      dim();
+      card('PAUSED', ['The museum waits for no one.', '', 'Press P or Enter to keep going'], PALETTE.text);
     } else if (screen === SCREEN_BUSTED) {
-      const reason = state.bustedReason === 'alarm'
-        ? 'The alarm countdown ran out while you were still seen.'
-        : 'A guard caught you in the open.';
-      const lines = [
-        reason,
+      dim();
+      const why = state.bustedReason === 'alarm'
+        ? 'The alarm countdown ran out while you were seen.'
+        : 'A guard caught you red-handed.';
+      card('BUSTED!', [why, `Score: ${state.score}   ·   Loot: $${state.lootValue}`, '', 'Press R to retry, Enter to try again'], PALETTE.red);
+    } else if (screen === SCREEN_CLEARED) {
+      dim();
+      const level = LEVELS[state.levelIndex];
+      card(`${level.name} — CLEAR!`, [
+        `Loot: $${state.lootValue}   ·   Time bonus: $${state.timeBonus}`,
+        state.ghostBonus > 0 ? `Ghost bonus (never seen): $${state.ghostBonus}` : 'Spotted along the way — no ghost bonus',
+        `Score: ${state.score}`,
         '',
-        `Loot ${money(state.lootValue)} · Score ${money(state.score)}`,
-        bestLabel(info.best),
-      ];
-      drawPanel('BUSTED!', lines, 'Press R to retry — Enter for the title', '#e5534b');
-    } else if (screen === SCREEN_CLEAR) {
-      const lines = [
-        `Loot ${money(state.lootValue)}  +  Diamond $1,000`,
-        `Time bonus ${money(state.timeBonus)}  ·  Ghost bonus ${money(state.ghostBonus)}`,
-        '',
-        `Level score ${money(state.score)}`,
-      ];
-      const last = state.levelIndex + 1 >= LEVELS.length;
-      drawPanel(last ? 'THE VAULT IS YOURS' : 'CLEAN GETAWAY!', lines, last ? 'Press Enter for the heist report' : 'Press Enter for the next floor', PALETTE.diamond);
+        'Press Enter for the next level',
+      ], PALETTE.gold);
     } else if (screen === SCREEN_FINAL) {
-      const lines = [
-        `Total loot ${money(info.totalLoot)}  ·  Total score ${money(info.totalScore)}`,
-        `Best ${money(info.best)}`,
+      dim();
+      card('THE HEIST IS DONE', [
+        'The Aurora Diamond is yours. The van is gone before dawn.',
+        `Loot: $${state.lootValue}   ·   Time bonus: $${state.timeBonus}`,
+        state.ghostBonus > 0 ? `Ghost bonus (never seen): $${state.ghostBonus}` : 'Spotted along the way — no ghost bonus',
+        `Final score: ${state.score}   ·   Best: ${Math.max(best, state.score)}`,
         '',
-        'The Aurora Diamond is gone. The museum never saw a thing.',
-      ];
-      drawPanel('THE PERFECT HEIST', lines, 'Press Enter for the title', PALETTE.thiefTrim);
+        'Press Enter to run it back',
+      ], PALETTE.gold);
     }
   }
 
-  resize();
-  window.addEventListener('resize', resize);
   return { draw };
 }
+
+export { createRenderer };
