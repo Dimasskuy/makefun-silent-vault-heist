@@ -131,4 +131,3 @@ const LEVELS = [
   },
 ];
 
-export { LEVELS };

@@ -2,19 +2,19 @@
 // 1280x720 logical area (32x18 tiles of 40px); the renderer scales it to the
 // window, so no rule below depends on the screen size.
 
-export const TILE = 40;
-export const FIELD = { width: 1280, height: 720, cols: 32, rows: 18 };
+const TILE = 40;
+const FIELD = { width: 1280, height: 720, cols: 32, rows: 18 };
 
 /** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
-export const STEP = 1 / 60;
+const STEP = 1 / 60;
 
-export const PLAYER = {
+const PLAYER = {
   radius: 12,
   walk: 180,
   sneak: 95,
 };
 
-export const GUARD = {
+const GUARD = {
   radius: 13,
   patrol: 65,
   chase: 140,
@@ -27,13 +27,13 @@ export const GUARD = {
   catchDist: 27,
 };
 
-export const CAMERA = {
+const CAMERA = {
   range: 270,
   halfAngle: 0.5,
   disableSeconds: 12,
 };
 
-export const ALARM = {
+const ALARM = {
   cameraStand: 24,
   cameraSneak: 8,
   guardSuspicious: 11,
@@ -44,17 +44,17 @@ export const ALARM = {
   disarmLevel: 55,
 };
 
-export const LASER = {
+const LASER = {
   tripDist: 11,
 };
 
-export const SCORE = {
+const SCORE = {
   diamond: 1000,
   ghostBonus: 500,
   timeBonusPerSecond: 15,
 };
 
-export const PALETTE = {
+const PALETTE = {
   backdrop: '#0e1220',
   floorA: '#1a2138',
   floorB: '#171d31',
@@ -87,7 +87,7 @@ export const PALETTE = {
   red: '#e5534b',
 };
 
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
 /** Where the best score is kept between visits (this browser only). */
-export const BEST_KEY = 'silent-vault.best';
+const BEST_KEY = 'silent-vault.best';

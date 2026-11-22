@@ -3,8 +3,6 @@
 // (a breadth-first path, crossed only when no guard's cone covers the next
 // tile), so the frame is what a short game really looks like and the same
 // seed always gives the same frame.
-import { STEP, TILE } from './config.js';
-import { SCREEN_BUSTED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 
 const START_SECONDS = 5;
 const MAX_SECONDS = 90;
@@ -74,7 +72,7 @@ function tileOf(world, x, y) {
  * diamond glowing, the alarm part-filled. vault: inside the laser vault.
  * busted: the thief stands on a patrol line until a guard catches them.
  */
-export function stageShot(name, world) {
+function stageShot(name, world) {
   if (name !== 'play' && name !== 'vault' && name !== 'busted') {
     world.reset(0);
     for (let i = 0; i < START_SECONDS / STEP; i += 1) world.step(STEP, null, true);

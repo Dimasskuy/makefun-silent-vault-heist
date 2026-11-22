@@ -6,13 +6,6 @@
 // ?seed=N fixes the seed. ?shot=start|play|vault|busted (with &seed=N)
 // stages that scene instead of running the loop, paints it twice and sets
 // window.__shotReady for a screenshot.
-import { BEST_KEY, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_BUSTED, EVENT_CLEARED, EVENT_PANEL, EVENT_PICKUP, EVENT_SUSPICIOUS, EVENT_TRIP } from './world.js';
-import { ACTION_CONFIRM, ACTION_INTERACT, ACTION_MUTE, ACTION_PAUSE, ACTION_RESTART, createInput } from './input.js';
-import { createRenderer, SCREEN_BUSTED, SCREEN_CLEARED, SCREEN_FINAL, SCREEN_INTRO, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { createSound } from './sound.js';
-import { stageShot } from './shots.js';
 
 /** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
 const MAX_FRAME = 0.25;
@@ -49,6 +42,7 @@ function saveBest(value) {
 
 function runShot(name) {
   const scene = stageShot(name, world);
+  window.__silentVault.screen = scene.screen;
   let painted = 0;
   function paint() {
     renderer.draw(world.state, scene.screen, scene.best);
@@ -187,6 +181,7 @@ function runGame() {
       accumulator = 0;
     }
     renderer.draw(world.state, screen, best);
+    window.__silentVault.screen = screen;
   }
 
   // Leaving the tab pauses a running game rather than letting guards walk unseen.

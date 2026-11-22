@@ -1,16 +1,14 @@
 // The rules of SILENT VAULT, no drawing here. The world is stepped in fixed
 // 1/60 s slices by main.js; every rule is a pure function of the state, so a
 // seeded run replays exactly the same way.
-import { TILE, FIELD, PLAYER, GUARD, CAMERA, ALARM, LASER, SCORE } from './config.js';
-import { LEVELS } from './levels.js';
 
-export const EVENT_NONE = 0;
-export const EVENT_PICKUP = 1;
-export const EVENT_PANEL = 2;
-export const EVENT_SUSPICIOUS = 4;
-export const EVENT_TRIP = 8;
-export const EVENT_BUSTED = 16;
-export const EVENT_CLEARED = 32;
+const EVENT_NONE = 0;
+const EVENT_PICKUP = 1;
+const EVENT_PANEL = 2;
+const EVENT_SUSPICIOUS = 4;
+const EVENT_TRIP = 8;
+const EVENT_BUSTED = 16;
+const EVENT_CLEARED = 32;
 
 const TAU = Math.PI * 2;
 
@@ -543,4 +541,3 @@ function createWorld(random) {
   };
 }
 
-export { createWorld };

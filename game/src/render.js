@@ -1,16 +1,14 @@
 // All drawing lives here: the museum, the cones, the thief, the HUD and
 // every screen. It never changes the world; it only paints the state it is
 // handed. The canvas is a fixed 1280x720 logical area scaled to the window.
-import { TILE, FIELD, FONT, PALETTE, PLAYER, GUARD, CAMERA } from './config.js';
-import { LEVELS } from './levels.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_INTRO = 'intro';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_BUSTED = 'busted';
-export const SCREEN_CLEARED = 'cleared';
-export const SCREEN_FINAL = 'final';
+const SCREEN_TITLE = 'title';
+const SCREEN_INTRO = 'intro';
+const SCREEN_PLAY = 'play';
+const SCREEN_PAUSED = 'paused';
+const SCREEN_BUSTED = 'busted';
+const SCREEN_CLEARED = 'cleared';
+const SCREEN_FINAL = 'final';
 
 const TINTS = {
   gallery: PALETTE.floorGallery,
@@ -444,4 +442,3 @@ function createRenderer(canvas) {
   return { draw };
 }
 
-export { createRenderer };

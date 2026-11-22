@@ -3,7 +3,7 @@
 // randomness, but particles and any jitter draw from this, never from
 // Math.random, so a seeded run stays deterministic.
 
-export function createRandom(seed) {
+function createRandom(seed) {
   let a = seed >>> 0;
   return {
     next() {

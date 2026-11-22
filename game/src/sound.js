@@ -86,4 +86,3 @@ function createSound() {
   };
 }
 
-export { createSound };

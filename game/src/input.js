@@ -2,11 +2,11 @@
 // frame; action keys (confirm, pause, restart, mute, interact) are edges:
 // takeActions() returns them once and clears them.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
-export const ACTION_RESTART = 4;
-export const ACTION_MUTE = 8;
-export const ACTION_INTERACT = 16;
+const ACTION_CONFIRM = 1;
+const ACTION_PAUSE = 2;
+const ACTION_RESTART = 4;
+const ACTION_MUTE = 8;
+const ACTION_INTERACT = 16;
 
 const MOVE_KEYS = {
   KeyW: [0, -1],
@@ -95,4 +95,3 @@ function createInput(canvas) {
   };
 }
 
-export { createInput };
